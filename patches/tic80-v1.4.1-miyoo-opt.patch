@@ -1,0 +1,442 @@
+diff --git a/src/api/luaapi.c b/src/api/luaapi.c
+index a4d0a90..d309062 100644
+--- a/src/api/luaapi.c
++++ b/src/api/luaapi.c
+@@ -2092,17 +2092,57 @@ void callLuaIntCallback(tic_mem* tic, s32 value, void* data, const char* name)
+     }
+ }
+ 
++// [miyoo-opt] The blitter calls SCN/BDR for every row (144x per frame). Looking the globals
++// up each time is costly when a cart doesn't define them (most carts). Row 0 always comes first
++// in a frame, so check there whether they are functions and skip the lookups for that frame.
++static bool luaGlobalIsFunction(tic_mem* tic, const char* name)
++{
++    lua_State* lua = ((tic_core*)tic)->currentVM;
++    if(!lua) return false;
++    lua_getglobal(lua, name);
++    bool is = lua_isfunction(lua, -1);
++    lua_pop(lua, 1);
++    return is;
++}
++
++static struct
++{
++    void* vm;
++    bool scn, oldscn, bdr;
++} LuaCallbacks;
++
+ void luaapi_scn(tic_mem* tic, s32 row, void* data)
+ {
+-    callLuaIntCallback(tic, row, data, SCN_FN);
++    void* vm = ((tic_core*)tic)->currentVM;
++    if(row == 0 || vm != LuaCallbacks.vm)
++    {
++        LuaCallbacks.vm = vm;
++        LuaCallbacks.scn = luaGlobalIsFunction(tic, SCN_FN);
++        LuaCallbacks.oldscn = luaGlobalIsFunction(tic, "scanline");
++        LuaCallbacks.bdr = luaGlobalIsFunction(tic, BDR_FN);
++    }
++
++    if(LuaCallbacks.scn)
++        callLuaIntCallback(tic, row, data, SCN_FN);
+ 
+     // try to call old scanline
+-    callLuaIntCallback(tic, row, data, "scanline");
++    if(LuaCallbacks.oldscn)
++        callLuaIntCallback(tic, row, data, "scanline");
+ }
+ 
+ void luaapi_bdr(tic_mem* tic, s32 row, void* data)
+ {
+-    callLuaIntCallback(tic, row, data, BDR_FN);
++    void* vm = ((tic_core*)tic)->currentVM;
++    if(row == 0 || vm != LuaCallbacks.vm)
++    {
++        LuaCallbacks.vm = vm;
++        LuaCallbacks.scn = luaGlobalIsFunction(tic, SCN_FN);
++        LuaCallbacks.oldscn = luaGlobalIsFunction(tic, "scanline");
++        LuaCallbacks.bdr = luaGlobalIsFunction(tic, BDR_FN);
++    }
++
++    if(LuaCallbacks.bdr)
++        callLuaIntCallback(tic, row, data, BDR_FN);
+ }
+ 
+ void luaapi_menu(tic_mem* tic, s32 index, void* data)
+diff --git a/src/core/core.c b/src/core/core.c
+index fa7cbbc..eb74fca 100644
+--- a/src/core/core.c
++++ b/src/core/core.c
+@@ -664,7 +664,29 @@ static inline void updpal(tic_mem* tic, tic_blitpal* pal0, tic_blitpal* pal1)
+     *pal1 = tic_tool_palette_blit(&vbank1(core)->palette, core->screen_format);
+ }
+ 
+-static inline void updbdr(tic_mem* tic, s32 row, u32* ptr, tic_blit_callback clb, tic_blitpal* pal0, tic_blitpal* pal1)
++// [miyoo-opt] palettes the blit tables were last built from; rebuilding is skipped while the
++// palette bytes are unchanged (BDR/SCN callbacks may change them per row, most carts never do)
++typedef struct
++{
++    tic_palette p0, p1;
++    tic80_pixel_color_format fmt;
++} BlitPalKey;
++
++static inline void updpalCached(tic_mem* tic, tic_blitpal* pal0, tic_blitpal* pal1, BlitPalKey* key)
++{
++    tic_core* core = (tic_core*)tic;
++    if(key->fmt != core->screen_format
++        || memcmp(&key->p0, &vbank0(core)->palette, sizeof(tic_palette)) != 0
++        || memcmp(&key->p1, &vbank1(core)->palette, sizeof(tic_palette)) != 0)
++    {
++        updpal(tic, pal0, pal1);
++        key->p0 = vbank0(core)->palette;
++        key->p1 = vbank1(core)->palette;
++        key->fmt = core->screen_format;
++    }
++}
++
++static inline void updbdr(tic_mem* tic, s32 row, u32* ptr, tic_blit_callback clb, tic_blitpal* pal0, tic_blitpal* pal1, BlitPalKey* key)
+ {
+     tic_core* core = (tic_core*)tic;
+ 
+@@ -679,7 +701,7 @@ static inline void updbdr(tic_mem* tic, s32 row, u32* ptr, tic_blit_callback clb
+     }
+ 
+     if(clb.border || clb.scanline)
+-        updpal(tic, pal0, pal1);
++        updpalCached(tic, pal0, pal1, key);
+ 
+     memset4(ptr, pal0->data[vbank0(core)->vars.border], TIC80_FULLWIDTH);
+ }
+@@ -725,12 +747,16 @@ void tic_core_blit_ex(tic_mem* tic, tic_blit_callback clb)
+ #endif
+ 
+     tic_blitpal pal0, pal1;
++    BlitPalKey palKey;
+     updpal(tic, &pal0, &pal1);
++    palKey.p0 = vbank0(core)->palette;
++    palKey.p1 = vbank1(core)->palette;
++    palKey.fmt = core->screen_format;
+ 
+     s32 row = 0;
+     u32* rowPtr = tic->product.screen;
+ 
+-#define UPDBDR() updbdr(tic, row, rowPtr, clb, &pal0, &pal1)
++#define UPDBDR() updbdr(tic, row, rowPtr, clb, &pal0, &pal1, &palKey)
+ 
+     for(; row != TIC80_MARGIN_TOP; ++row, rowPtr += TIC80_FULLWIDTH)
+         UPDBDR();
+@@ -743,8 +769,34 @@ void tic_core_blit_ex(tic_mem* tic, tic_blit_callback clb)
+         if(*(u16*)&vbank0(core)->vars.offset == 0 && *(u16*)&vbank1(core)->vars.offset == 0)
+         {
+             // render line without XY offsets
+-            for(s32 x = (row - TIC80_MARGIN_TOP) * TIC80_WIDTH, end = x + TIC80_WIDTH; x != end; ++x)
+-                *rowPtr++ = blitpix(tic, x, x, &pal0, &pal1);
++            s32 first = (row - TIC80_MARGIN_TOP) * TIC80_WIDTH;
++
++            // [miyoo-opt] if this vbank1 row is entirely its clear color, blitpix() would pick
++            // vbank0 for every pixel: convert vbank0 directly, two pixels per byte
++            const u8* row1 = vbank1(core)->screen.data + first / 2;
++            const u8 clear = vbank1(core)->vars.clear;
++            const u8 clear2 = clear | (clear << 4);
++            bool row1Clear = true;
++            for(s32 i = 0; i != TIC80_WIDTH / 2; ++i)
++                if(row1[i] != clear2)
++                {
++                    row1Clear = false;
++                    break;
++                }
++
++            if(row1Clear)
++            {
++                const u8* row0 = vbank0(core)->screen.data + first / 2;
++                for(s32 i = 0; i != TIC80_WIDTH / 2; ++i)
++                {
++                    u8 b = row0[i];
++                    *rowPtr++ = pal0.data[b & 0xf];
++                    *rowPtr++ = pal0.data[b >> 4];
++                }
++            }
++            else
++                for(s32 x = first, end = x + TIC80_WIDTH; x != end; ++x)
++                    *rowPtr++ = blitpix(tic, x, x, &pal0, &pal1);
+         }
+         else
+         {
+diff --git a/src/core/draw.c b/src/core/draw.c
+index b9cb16e..2e91f79 100644
+--- a/src/core/draw.c
++++ b/src/core/draw.c
+@@ -73,25 +73,43 @@ static inline u8 mapColor(tic_mem* tic, u8 color)
+     return tic_tool_peek4(tic->ram->vram.mapping, color & 0xf);
+ }
+ 
++// [miyoo-opt] Write a screen pixel directly. Equivalent to tic_api_poke4() for screen
++// addresses (the screen is at the start of RAM), without the generic bounds/width dispatch.
++static inline void pokeScreen(tic_core* core, s32 index, u8 color)
++{
++    tic_tool_poke4(core->memory.ram, index, color);
++}
++
+ static inline void setPixel(tic_core* core, s32 x, s32 y, u8 color)
+ {
+ 
+     if(x < core->state.clip.l || y < core->state.clip.t || x >= core->state.clip.r || y >= core->state.clip.b) return;
+ 
+-    tic_api_poke4((tic_mem*)core, y * TIC80_WIDTH + x, color);
++    pokeScreen(core, y * TIC80_WIDTH + x, color);
+ }
+ 
+ static inline void setPixelFast(tic_core* core, s32 x, s32 y, u8 color)
+ {
+     // does not do any CLIP checking, the caller needs to do that first
+-    tic_api_poke4((tic_mem*)core, y * TIC80_WIDTH + x, color);
++    pokeScreen(core, y * TIC80_WIDTH + x, color);
++}
++
++// [miyoo-opt] Fill screen pixels [from, to) with one color: whole bytes via memset.
++static inline void fillScreen(tic_core* core, s32 from, s32 to, u8 color)
++{
++    if(from >= to) return;
++    u8* ram = (u8*)core->memory.ram;
++    color &= 0xf;
++    if(from & 1) tic_tool_poke4(ram, from++, color);
++    if(to & 1) tic_tool_poke4(ram, --to, color);
++    if(to > from) memset(ram + (from >> 1), color | (color << 4), (to - from) >> 1);
+ }
+ 
+ static inline u8 getPixel(tic_core* core, s32 x, s32 y)
+ {
+     return x < 0 || y < 0 || x >= TIC80_WIDTH || y >= TIC80_HEIGHT
+                ? 0
+-               : tic_api_peek4((tic_mem*)core, y * TIC80_WIDTH + x);
++               : tic_tool_peek4(core->memory.ram, y * TIC80_WIDTH + x);
+ }
+ 
+ // clang-format off
+@@ -113,8 +131,7 @@ static void drawHLine(tic_core* core, s32 x, s32 y, s32 width, u8 color)
+     s32 xr = MIN(x + width, core->state.clip.r);
+     s32 start = y * TIC80_WIDTH;
+ 
+-    for(s32 i = start + xl, end = start + xr; i < end; ++i)
+-        tic_api_poke4((tic_mem*)core, i, color);
++    fillScreen(core, start + xl, start + xr, color);
+ }
+ 
+ static void drawVLine(tic_core* core, s32 x, s32 y, s32 height, u8 color)
+@@ -144,25 +161,41 @@ static void drawRectBorder(tic_core* core, s32 x, s32 y, s32 width, s32 height,
+     drawVLine(core, x + width - 1, y, height, color);
+ }
+ 
++// [miyoo-opt] tile pixel readers: the generic one calls segment->peek through a function
++// pointer for every pixel; the 4bpp one (normal sprites/map) reads the nibble directly.
++#define TILEPIX_GENERIC(X, Y) tic_tilesheet_gettilepix(tile, (X), (Y))
++#define TILEPIX_4BPP(X, Y) tic_tool_peek4(tptr, toff + (X) + (Y) * TIC_SPRITESIZE)
++
++static inline bool isTile4bpp(const tic_tileptr* tile)
++{
++    return tile->segment->peek == tic_tool_peek4 && tile->segment->tile_width == TIC_SPRITESIZE;
++}
++
+ // clang-format off
+-#define DRAW_TILE_BODY(X, Y) do {\
++#define DRAW_TILE_BODY_WITH(GET, X, Y) do {\
+     for(s32 py=sy; py < ey; py++, y++) \
+     { \
+         s32 xx = x; \
+         for(s32 px=sx; px < ex; px++, xx++) \
+         { \
+-            u8 color = mapping[tic_tilesheet_gettilepix(tile, (X), (Y))];\
++            u8 color = mapping[GET((X), (Y))];\
+             if(color != TRANSPARENT_COLOR) setPixelFast(core, xx, y, color); \
+         } \
+     } \
+     } while(0)
++#define DRAW_TILE_BODY(X, Y) do { \
++    if(fast4) DRAW_TILE_BODY_WITH(TILEPIX_4BPP, X, Y); \
++    else DRAW_TILE_BODY_WITH(TILEPIX_GENERIC, X, Y); \
++    } while(0)
+ // clang-format on
+ 
+ #define REVERT(X) (TIC_SPRITESIZE - 1 - (X))
+ 
+-static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate)
++static void drawTileMapped(tic_core* core, tic_tileptr* tile, s32 x, s32 y, const u8* mapping, s32 scale, tic_flip flip, tic_rotate rotate)
+ {
+-    u8* mapping = getPalette(&core->memory, colors, (u8)(count));
++    const bool fast4 = isTile4bpp(tile);
++    const u8* tptr = tile->ptr;
++    const u32 toff = tile->offset;
+ 
+     rotate &= 3;
+     u32 orientation = flip & 3;
+@@ -218,13 +251,19 @@ static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors
+                 ix = iy;
+                 iy = tmp;
+             }
+-            u8 color = mapping[tic_tilesheet_gettilepix(tile, ix, iy)];
++            u8 color = mapping[fast4 ? TILEPIX_4BPP(ix, iy) : TILEPIX_GENERIC(ix, iy)];
+             if(color != TRANSPARENT_COLOR) drawRect(core, xx, y, scale, scale, color);
+         }
+     }
+ }
+ 
++static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate)
++{
++    drawTileMapped(core, tile, x, y, getPalette(&core->memory, colors, (u8)(count)), scale, flip, rotate);
++}
++
+ #undef DRAW_TILE_BODY
++#undef DRAW_TILE_BODY_WITH
+ #undef REVERT
+ 
+ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate)
+@@ -251,6 +290,8 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+ 
+         if(EARLY_CLIP(x, y, w * step, h * step)) return;
+ 
++        const u8* mapping = getPalette(&core->memory, colors, (u8)(count));
++
+         for(s32 i = 0; i < w; i++)
+         {
+             for(s32 j = 0; j < h; j++)
+@@ -288,9 +329,9 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+ 
+                 tic_tileptr tile = tic_tilesheet_gettile(&sheet, index + mx + my * cols, false);
+                 if(rotate == 0 || rotate == 2)
+-                    drawTile(core, &tile, x + i * step, y + j * step, colors, count, scale, flip, rotate);
++                    drawTileMapped(core, &tile, x + i * step, y + j * step, mapping, scale, flip, rotate);
+                 else
+-                    drawTile(core, &tile, x + j * step, y + i * step, colors, count, scale, flip, rotate);
++                    drawTileMapped(core, &tile, x + j * step, y + i * step, mapping, scale, flip, rotate);
+             }
+         }
+     }
+@@ -301,6 +342,7 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+     const s32 size = TIC_SPRITESIZE * scale;
+ 
+     tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, core->memory.ram->vram.blit.segment);
++    const u8* mapping = getPalette(&core->memory, colors, (u8)(count));
+ 
+     for(s32 j = y, jj = sy; j < y + height; j++, jj += size)
+         for(s32 i = x, ii = sx; i < x + width; i++, ii += size)
+@@ -315,7 +357,10 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+                 remap(data, mi, mj, &retile);
+ 
+             tic_tileptr tile = tic_tilesheet_gettile(&sheet, retile.index, true);
+-            drawTile(core, &tile, ii, jj, colors, count, scale, retile.flip, retile.rotate);
++            // a remap callback runs script code per tile and could change the palette mapping,
++            // so then rebuild it per tile exactly like the original code did
++            drawTileMapped(core, &tile, ii, jj, remap ? getPalette(&core->memory, colors, (u8)(count)) : mapping,
++                           scale, retile.flip, retile.rotate);
+         }
+ }
+ 
+@@ -327,6 +372,22 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
+         Size = TIC_SPRITESIZE
+     };
+ 
++    // [miyoo-opt] read the glyph once into a local 8x8 buffer (no per-pixel function pointer)
++    u8 glyph[Size][Size];
++    if(font_char->segment->peek == tic_tool_peek1 && font_char->segment->tile_width == Size)
++    {
++        for(s32 gx = 0; gx < Size; gx++)
++            for(s32 gy = 0; gy < Size; gy++)
++                glyph[gx][gy] = tic_tool_peek1(font_char->ptr, font_char->offset + gx + gy * Size);
++    }
++    else
++    {
++        for(s32 gx = 0; gx < Size; gx++)
++            for(s32 gy = 0; gy < Size; gy++)
++                glyph[gx][gy] = tic_tilesheet_gettilepix(font_char, gx, gy);
++    }
++#define tic_tilesheet_gettilepix(T, X, Y) glyph[(X)][(Y)]
++
+     s32 j = 0, start = 0, end = Size;
+ 
+     if(!fixed)
+@@ -362,10 +423,17 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
+         {
+             u8 color = tic_tilesheet_gettilepix(font_char, col, row);
+             if(mapping[color] != TRANSPARENT_COLOR)
+-                drawRect(core, xs, ys, scale, scale, mapping[color]);
++            {
++                // drawRect(x, y, 1, 1) clips exactly like setPixel()
++                if(scale == 1)
++                    setPixel(core, xs, ys, mapping[color]);
++                else
++                    drawRect(core, xs, ys, scale, scale, mapping[color]);
++            }
+         }
+     }
+     return width;
++#undef tic_tilesheet_gettilepix
+ }
+ 
+ static s32 drawText(tic_core* core, tic_tilesheet* font_face, const char* text, s32 x, s32 y, s32 width, s32 height, bool fixed, u8* mapping, s32 scale, bool alt)
+@@ -418,6 +486,8 @@ void tic_api_rect(tic_mem* memory, s32 x, s32 y, s32 width, s32 height, u8 color
+ }
+ 
+ static double ZBuffer[TIC80_WIDTH * TIC80_HEIGHT];
++// [miyoo-opt] true once ttri() with depth wrote to ZBuffer; while false ZBuffer is all zeros
++static bool ZBufferDirty = false;
+ 
+ void tic_api_cls(tic_mem* tic, u8 color)
+ {
+@@ -431,16 +501,23 @@ void tic_api_cls(tic_mem* tic, u8 color)
+     if(MEMCMP(core->state.clip, EmptyClip))
+     {
+         memset(&vram->screen, (color & 0xf) | (color << TIC_PALETTE_BPP), sizeof(tic_screen));
+-        ZEROMEM(ZBuffer);
++        if(ZBufferDirty)
++        {
++            ZEROMEM(ZBuffer);
++            ZBufferDirty = false;
++        }
+     }
+     else
+     {
+         for(s32 y = core->state.clip.t, start = y * TIC80_WIDTH; y < core->state.clip.b; ++y, start += TIC80_WIDTH)
+-            for(s32 x = core->state.clip.l, pixel = start + x; x < core->state.clip.r; ++x, ++pixel)
++        {
++            if(core->state.clip.l < core->state.clip.r)
+             {
+-                tic_api_poke4(tic, pixel, color);
+-                ZBuffer[pixel] = 0;
++                fillScreen(core, start + core->state.clip.l, start + core->state.clip.r, color);
++                if(ZBufferDirty)
++                    memset(&ZBuffer[start + core->state.clip.l], 0, (core->state.clip.r - core->state.clip.l) * sizeof ZBuffer[0]);
+             }
++        }
+     }
+ }
+ 
+@@ -690,8 +767,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
+         s32 xr = MIN(SidesBuffer.Right[y] + 1, core->state.clip.r);
+         s32 start = y * TIC80_WIDTH;
+ 
+-        for(s32 i = start + xl, end = start + xr; i < end; ++i)
+-            tic_api_poke4(memory, i, color);
++        fillScreen(core, start + xl, start + xr, color);
+     }
+ }
+ 
+@@ -959,7 +1035,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+             {
+                 u8 color = shader(&a, pixel);
+                 if(color != TRANSPARENT_COLOR)
+-                    tic_api_poke4(tic, pixel, color);
++                    pokeScreen(core, pixel, color);
+             }
+ 
+             for(s32 i = 0; i != COUNT_OF(a.w.d); ++i)
+@@ -1050,7 +1126,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
+     TexData* data = a->data;
+ 
+     if(data->depth && color != TRANSPARENT_COLOR)
++    {
+         ZBuffer[pixel] = vars->z;
++        ZBufferDirty = true;
++    }
+ 
+     return color;
+ }

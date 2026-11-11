@@ -1,0 +1,6 @@
+# downloads, TIC-80 sources, build output (recreated by build-core.sh)
+work/
+# built core
+dist/
+__pycache__/
+*.pyc
