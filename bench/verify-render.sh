@@ -30,6 +30,11 @@ cp "$(find "$W/tic80-$TAG" -path '*libretro-common/include/libretro.h' | head -1
 
 run() { docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$W:/work" "$@"; }
 
+# rebuild the patched PC core if the TIC-80 sources changed since it was built
+if [ -f "$W/x86-patched/tic80_libretro.so" ] && \
+   [ -n "$(find "$W/tic80-$TAG/src" -newer "$W/x86-patched/tic80_libretro.so" -name '*.c' | head -1)" ]; then
+  rm -rf "$W/x86-patched"
+fi
 for v in plain patched; do
   src="tic80-$TAG"; [ $v = plain ] && src="tic80-$TAG-plain"
   if [ ! -f "$W/x86-$v/tic80_libretro.so" ]; then
@@ -54,12 +59,15 @@ if [ -z "$C" ]; then
 else
   C="$(cd "$C" && pwd)"
 fi
+# always include the triangle stress test (tri/trib/ttri/textri, clipping, depth, odd UVs)
+python3 -I "$HERE/bench/make_tri_test_cart.py" "$V/tritest.tic" >/dev/null
+TRI="$V/tritest.tic"
 rm -rf "$V/out"; mkdir -p "$V/out"
 
-echo ">> running $(ls "$C"/*.tic | wc -l) carts x $FRAMES frames (plain twice, patched once)"
+echo ">> running $(( $(ls "$C"/*.tic | wc -l) + 1 )) carts x $FRAMES frames (plain twice, patched once)"
 docker run --rm --user "$(id -u):$(id -g)" -v "$W:/work" -v "$C:/carts:ro" "$IMAGE" sh -c '
   cd /work/verify/out
-  for c in /carts/*.tic; do
+  for c in /carts/*.tic /work/verify/tritest.tic; do
     n=$(basename "$c" .tic)
     for r in plain:a plain:b patched:p; do
       core=${r%%:*}; tag=${r#*:}

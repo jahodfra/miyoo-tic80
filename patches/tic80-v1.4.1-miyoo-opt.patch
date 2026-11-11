@@ -163,7 +163,7 @@ index fa7cbbc..eb74fca 100644
          else
          {
 diff --git a/src/core/draw.c b/src/core/draw.c
-index b9cb16e..2e91f79 100644
+index b9cb16e..87b2297 100644
 --- a/src/core/draw.c
 +++ b/src/core/draw.c
 @@ -73,25 +73,43 @@ static inline u8 mapColor(tic_mem* tic, u8 color)
@@ -223,7 +223,7 @@ index b9cb16e..2e91f79 100644
  }
  
  static void drawVLine(tic_core* core, s32 x, s32 y, s32 height, u8 color)
-@@ -144,25 +161,41 @@ static void drawRectBorder(tic_core* core, s32 x, s32 y, s32 width, s32 height,
+@@ -144,25 +161,73 @@ static void drawRectBorder(tic_core* core, s32 x, s32 y, s32 width, s32 height,
      drawVLine(core, x + width - 1, y, height, color);
  }
  
@@ -235,6 +235,38 @@ index b9cb16e..2e91f79 100644
 +static inline bool isTile4bpp(const tic_tileptr* tile)
 +{
 +    return tile->segment->peek == tic_tool_peek4 && tile->segment->tile_width == TIC_SPRITESIZE;
++}
++
++// [miyoo-opt] Exact equivalent of (s32)floor(v). ARMv7 has no rounding instruction, so floor()
++// is a library call; this is two instructions. (Saturating conversions behave the same.)
++static inline s32 floorToInt(double v)
++{
++    s32 i = (s32)v;
++    if(v < (double)i && i != INT32_MIN) --i;
++    return i;
++}
++
++// [miyoo-opt] A normal 4bpp sprite sheet (one page): the cases below are then plain shifts/masks.
++static inline bool isSheet4bpp(const tic_tilesheet* sheet)
++{
++    const tic_blit_segment* s = sheet->segment;
++    return s->peek == tic_tool_peek4 && s->nb_pages == 1 && s->page_orig == 0
++        && s->tile_width == TIC_SPRITESIZE && s->ptr_size == sizeof(tic_tile);
++}
++
++// Same result as tic_tilesheet_getpix(sheet, x, y) for a 4bpp sheet, x in 0..127, y >= 0.
++static inline u8 sheetPix4(const tic_tilesheet* sheet, s32 x, s32 y)
++{
++    u32 bank_offset = (((y >> 7) + sheet->segment->bank_orig) & 1) << 8;
++    u16 tile_index = (u16)(bank_offset + (((y & 127) >> 3) << 4) + ((x & 127) >> 3));
++    return tic_tool_peek4(sheet->ptr + tile_index * sizeof(tic_tile), (x & 7) + (y & 7) * TIC_SPRITESIZE);
++}
++
++// Same result as tic_tilesheet_gettilepix(gettile(sheet, index, true), px, py) for a 4bpp sheet.
++static inline u8 mapTilePix4(const tic_tilesheet* sheet, u8 index, s32 px, s32 py)
++{
++    const u8* ptr = sheet->ptr + sizeof(tic_tile) * (sheet->segment->bank_orig * 256 + index);
++    return tic_tool_peek4(ptr, px + py * TIC_SPRITESIZE);
 +}
 +
  // clang-format off
@@ -269,7 +301,7 @@ index b9cb16e..2e91f79 100644
  
      rotate &= 3;
      u32 orientation = flip & 3;
-@@ -218,13 +251,19 @@ static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors
+@@ -218,13 +283,19 @@ static void drawTile(tic_core* core, tic_tileptr* tile, s32 x, s32 y, u8* colors
                  ix = iy;
                  iy = tmp;
              }
@@ -290,7 +322,7 @@ index b9cb16e..2e91f79 100644
  #undef REVERT
  
  static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8* colors, s32 count, s32 scale, tic_flip flip, tic_rotate rotate)
-@@ -251,6 +290,8 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+@@ -251,6 +322,8 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
  
          if(EARLY_CLIP(x, y, w * step, h * step)) return;
  
@@ -299,7 +331,7 @@ index b9cb16e..2e91f79 100644
          for(s32 i = 0; i < w; i++)
          {
              for(s32 j = 0; j < h; j++)
-@@ -288,9 +329,9 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
+@@ -288,9 +361,9 @@ static void drawSprite(tic_core* core, s32 index, s32 x, s32 y, s32 w, s32 h, u8
  
                  tic_tileptr tile = tic_tilesheet_gettile(&sheet, index + mx + my * cols, false);
                  if(rotate == 0 || rotate == 2)
@@ -311,7 +343,7 @@ index b9cb16e..2e91f79 100644
              }
          }
      }
-@@ -301,6 +342,7 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+@@ -301,6 +374,7 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
      const s32 size = TIC_SPRITESIZE * scale;
  
      tic_tilesheet sheet = getTileSheetFromSegment(&core->memory, core->memory.ram->vram.blit.segment);
@@ -319,7 +351,7 @@ index b9cb16e..2e91f79 100644
  
      for(s32 j = y, jj = sy; j < y + height; j++, jj += size)
          for(s32 i = x, ii = sx; i < x + width; i++, ii += size)
-@@ -315,7 +357,10 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
+@@ -315,7 +389,10 @@ static void drawMap(tic_core* core, const tic_map* src, s32 x, s32 y, s32 width,
                  remap(data, mi, mj, &retile);
  
              tic_tileptr tile = tic_tilesheet_gettile(&sheet, retile.index, true);
@@ -331,7 +363,7 @@ index b9cb16e..2e91f79 100644
          }
  }
  
-@@ -327,6 +372,22 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
+@@ -327,6 +404,22 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
          Size = TIC_SPRITESIZE
      };
  
@@ -354,7 +386,7 @@ index b9cb16e..2e91f79 100644
      s32 j = 0, start = 0, end = Size;
  
      if(!fixed)
-@@ -362,10 +423,17 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
+@@ -362,10 +455,17 @@ static s32 drawChar(tic_core* core, tic_tileptr* font_char, s32 x, s32 y, s32 sc
          {
              u8 color = tic_tilesheet_gettilepix(font_char, col, row);
              if(mapping[color] != TRANSPARENT_COLOR)
@@ -373,7 +405,7 @@ index b9cb16e..2e91f79 100644
  }
  
  static s32 drawText(tic_core* core, tic_tilesheet* font_face, const char* text, s32 x, s32 y, s32 width, s32 height, bool fixed, u8* mapping, s32 scale, bool alt)
-@@ -418,6 +486,8 @@ void tic_api_rect(tic_mem* memory, s32 x, s32 y, s32 width, s32 height, u8 color
+@@ -418,6 +518,8 @@ void tic_api_rect(tic_mem* memory, s32 x, s32 y, s32 width, s32 height, u8 color
  }
  
  static double ZBuffer[TIC80_WIDTH * TIC80_HEIGHT];
@@ -382,7 +414,7 @@ index b9cb16e..2e91f79 100644
  
  void tic_api_cls(tic_mem* tic, u8 color)
  {
-@@ -431,16 +501,23 @@ void tic_api_cls(tic_mem* tic, u8 color)
+@@ -431,16 +533,23 @@ void tic_api_cls(tic_mem* tic, u8 color)
      if(MEMCMP(core->state.clip, EmptyClip))
      {
          memset(&vram->screen, (color & 0xf) | (color << TIC_PALETTE_BPP), sizeof(tic_screen));
@@ -410,7 +442,7 @@ index b9cb16e..2e91f79 100644
      }
  }
  
-@@ -690,8 +767,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
+@@ -690,8 +799,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
          s32 xr = MIN(SidesBuffer.Right[y] + 1, core->state.clip.r);
          s32 start = y * TIC80_WIDTH;
  
@@ -420,7 +452,18 @@ index b9cb16e..2e91f79 100644
      }
  }
  
-@@ -959,7 +1035,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+@@ -907,7 +1015,9 @@ static inline double edgeFn(const Vec2* a, const Vec2* b, const Vec2* c)
+     return (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
+ }
+ 
+-static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2, PixelShader shader, void* data)
++// [miyoo-opt] always_inline: every caller passes a constant shader, so each gets its own loop
++// with the shader inlined instead of an indirect call per pixel.
++static inline __attribute__((always_inline)) void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2, PixelShader shader, void* data)
+ {
+     ShaderAttr a = {.data = data, .v = {v0, v1, v2}};
+ 
+@@ -959,7 +1069,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
              {
                  u8 color = shader(&a, pixel);
                  if(color != TRANSPARENT_COLOR)
@@ -429,7 +472,15 @@ index b9cb16e..2e91f79 100644
              }
  
              for(s32 i = 0; i != COUNT_OF(a.w.d); ++i)
-@@ -1050,7 +1126,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
+@@ -1010,6 +1120,7 @@ typedef struct
+     const u8* map;
+     const tic_vram* vram;
+     bool depth;
++    bool fast4; // [miyoo-opt] sheet is a normal 4bpp sheet
+ } TexData;
+ 
+ static inline bool shaderStart(const ShaderAttr* a, Vec3* vars, s32 pixel)
+@@ -1050,7 +1161,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
      TexData* data = a->data;
  
      if(data->depth && color != TRANSPARENT_COLOR)
@@ -440,3 +491,127 @@ index b9cb16e..2e91f79 100644
  
      return color;
  }
+@@ -1071,10 +1185,13 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
+         HMask = TIC_SPRITESIZE - 1
+     };
+ 
+-    s32 iu = tic_modulo((s32)(floor(vars.x)), MapWidth);
+-    s32 iv = tic_modulo((s32)(floor(vars.y)), MapHeight);
++    s32 iu = tic_modulo(floorToInt(vars.x), MapWidth);
++    s32 iv = tic_modulo(floorToInt(vars.y), MapHeight);
+ 
+     u8 idx = data->map[(iv >> 3) * TIC_MAP_WIDTH + (iu >> 3)];
++    if(data->fast4)
++        return shaderEnd(a, &vars, pixel, data->mapping[mapTilePix4(&data->sheet, idx, iu & WMask, iv & HMask)]);
++
+     tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
+ 
+     return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_gettilepix(&tile, iu & WMask, iv & HMask)]);
+@@ -1093,7 +1210,9 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
+         HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1
+     };
+ 
+-    return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_getpix(&data->sheet, (s32)floor(vars.x) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1), (s32)floor(vars.y) & HMask)]);
++    s32 tx = floorToInt(vars.x) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1);
++    s32 ty = floorToInt(vars.y) & HMask;
++    return shaderEnd(a, &vars, pixel, data->mapping[data->fast4 ? sheetPix4(&data->sheet, tx, ty) : tic_tilesheet_getpix(&data->sheet, tx, ty)]);
+ }
+ 
+ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+@@ -1104,8 +1223,8 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+     if(!shaderStart(a, &vars, pixel))
+         return TRANSPARENT_COLOR;
+ 
+-    s32 iu = tic_modulo((s32)(floor(vars.x)), TIC80_WIDTH);
+-    s32 iv = tic_modulo((s32)(floor(vars.y)), TIC80_HEIGHT);
++    s32 iu = tic_modulo(floorToInt(vars.x), TIC80_WIDTH);
++    s32 iv = tic_modulo(floorToInt(vars.y), TIC80_HEIGHT);
+ 
+     return shaderEnd(a, &vars, pixel, data->mapping[tic_tool_peek4(data->vram->data, iv * TIC80_WIDTH + iu)]);
+ }
+@@ -1132,6 +1251,7 @@ void tic_api_ttri(tic_mem* tic,
+             .vram = &((tic_core*)tic)->state.vbank.mem,
+             .depth = depth,
+         };
++    texData.fast4 = isSheet4bpp(&texData.sheet);
+ 
+     TexVert t[] =
+         {
+@@ -1146,23 +1266,25 @@ void tic_api_ttri(tic_mem* tic,
+                 t[i].d.y /= t[i].d.z,
+                 t[i].d.z = 1.0 / t[i].d.z;
+ 
+-    static const PixelShader Shaders[] =
+-        {
+-            [tic_tiles_texture] = triTexTileShader,
+-            [tic_map_texture] = triTexMapShader,
+-            [tic_vbank_texture] = triTexVbankShader,
+-        };
+-
+     // The enum is signed where the compiler keeps int for it (MSVC does), so
+     // the cast is what turns a negative source into an out-of-range one.
+     const u32 src = (u32)texsrc;
+ 
+-    if(src < (u32)COUNT_OF(Shaders))
+-        drawTri(tic,
+-                (const Vec2*)&t[0],
+-                (const Vec2*)&t[1],
+-                (const Vec2*)&t[2],
+-                Shaders[src], &texData);
++    // [miyoo-opt] constant shader per call site (instead of a table) so drawTri() inlines it
++    switch(src)
++    {
++        case tic_tiles_texture:
++            drawTri(tic, (const Vec2*)&t[0], (const Vec2*)&t[1], (const Vec2*)&t[2], triTexTileShader, &texData);
++            break;
++        case tic_map_texture:
++            drawTri(tic, (const Vec2*)&t[0], (const Vec2*)&t[1], (const Vec2*)&t[2], triTexMapShader, &texData);
++            break;
++        case tic_vbank_texture:
++            drawTri(tic, (const Vec2*)&t[0], (const Vec2*)&t[1], (const Vec2*)&t[2], triTexVbankShader, &texData);
++            break;
++        default:
++            break;
++    }
+ }
+ 
+ void tic_api_map(tic_mem* memory, s32 x, s32 y, s32 width, s32 height, s32 sx, s32 sy, u8* colors, u8 count, s32 scale, RemapFunc remap, void* data)
+diff --git a/src/core/draw_dep.c b/src/core/draw_dep.c
+index de14f27..dc9f9de 100644
+--- a/src/core/draw_dep.c
++++ b/src/core/draw_dep.c
+@@ -117,6 +117,7 @@ void tic_api_textri(tic_mem* memory, float x1, float y1, float x2, float y2, flo
+ 
+     const u8* map = memory->ram->map.data;
+     tic_tilesheet sheet = getTileSheetFromSegment(memory, memory->ram->vram.blit.segment);
++    const bool fast4 = isSheet4bpp(&sheet); // [miyoo-opt] direct 4bpp texture reads
+ 
+     V0.x = x1;
+     V0.y = y1;
+@@ -198,9 +199,14 @@ void tic_api_textri(tic_mem* memory, float x1, float y1, float x2, float y2, flo
+                         iv += MapHeight;
+ 
+                     u8 tileindex = map[(iv >> 3) * TIC_MAP_WIDTH + (iu >> 3)];
+-                    tic_tileptr tile = tic_tilesheet_gettile(&sheet, tileindex, true);
+-
+-                    u8 color = mapping[tic_tilesheet_gettilepix(&tile, iu & 7, iv & 7)];
++                    u8 color;
++                    if(fast4)
++                        color = mapping[mapTilePix4(&sheet, tileindex, iu & 7, iv & 7)];
++                    else
++                    {
++                        tic_tileptr tile = tic_tilesheet_gettile(&sheet, tileindex, true);
++                        color = mapping[tic_tilesheet_gettilepix(&tile, iu & 7, iv & 7)];
++                    }
+                     if(color != TRANSPARENT_COLOR)
+                         setPixel(core, x, y, color);
+                     u += dudxs;
+@@ -220,7 +226,7 @@ void tic_api_textri(tic_mem* memory, float x1, float y1, float x2, float y2, flo
+                     s32 iu = (u >> 16) & (SheetWidth - 1);
+                     s32 iv = (v >> 16) & (SheetHeight - 1);
+ 
+-                    u8 color = mapping[tic_tilesheet_getpix(&sheet, iu, iv)];
++                    u8 color = mapping[fast4 ? sheetPix4(&sheet, iu, iv) : tic_tilesheet_getpix(&sheet, iu, iv)];
+                     if(color != TRANSPARENT_COLOR)
+                         setPixel(core, x, y, color);
+                     u += dudxs;

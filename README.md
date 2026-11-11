@@ -84,10 +84,16 @@ TIC-80, run `NO_PATCHES=1 ./build-core.sh`.
 | 2 | Write screen pixels directly instead of through `tic_api_poke4()`. Fill rows and spans with `memset`: `rect`, filled `circ`/`elli`, partial `cls`. | `core/draw.c` |
 | 3 | Read 4 bpp sprite and map pixels directly (no function pointer per pixel). Build one colour table per `spr`/`map` call instead of one per 8×8 tile. Read text glyphs once per character (1 bpp fast path) and write 1× scale text pixels directly. | `core/draw.c` |
 | 4 | `cls()` clears the 261 KB `ttri` depth buffer only if it was written to. The frame conversion rebuilds palettes only when they changed, and converts rows where vbank 1 is unused straight from vbank 0, two pixels per byte. Lua, MoonScript, Fennel and YueScript look up `SCN`/`BDR` once per frame instead of 432 times. | `core/draw.c`, `core/core.c`, `api/luaapi.c` |
+| 5 | Triangles: `tri`/`ttri` get a separate copy of the pixel loop per shader, so the shader is inlined instead of called through a pointer per pixel. `floor()` is replaced by an exact inline equivalent; ARMv7 has no rounding instruction, so it was a library call, twice per pixel. `ttri` and `textri` read 4 bpp sprite and map textures directly. About 2× faster on the PC. | `core/draw.c`, `core/draw_dep.c` |
 
-**The output is unchanged.** Every frame of 60 carts was compared over 600 frames each on PC builds
-of the original and patched code: all 24 games on the card, the drawing and language tests, and
-the bunnymarks. All matched. Carts that seed randomness from the clock were run with a fixed clock.
+**The output is unchanged.** `bench/verify-render.sh` compared every frame of 64 carts, 600 frames
+each, on PC builds of the original and patched code. The carts are the drawing and language tests,
+the bunnymarks, a triangle stress cart (`bench/make_tri_test_cart.py`: every `tri`/`ttri`/`textri`
+mode, depth, clipping, off-screen and odd texture coordinates) and 24 games, including FPS80 and
+Portal TIC-80. All matched. Carts that seed randomness from the clock were run with a fixed clock.
+
+One game, Dragon Fury, is non-deterministic even on plain TIC-80 because it depends on memory
+addresses. Over repeated runs, both cores produce exactly the same two outcomes.
 
 One behaviour difference: if a cart *defines* `SCN`/`BDR`/`scanline` from inside `SCN`/`BDR`
 in the middle of a frame, it takes effect from the next frame instead of the next row.
