@@ -12,17 +12,29 @@ Measured on a Miyoo Mini+ at 1500 MHz.
 for TIC-80 1.x.
 
 **The speed patch on top of that.** The output is unchanged; see
-[Speed patch](#speed-patch-patchestic80-v141-miyoo-optpatch).
+[Speed patch](#speed-patch-patchestic80-v141-miyoo-optpatch). The table compares plain TIC-80 1.4.1
+(same compiler flags apart from item 1, symbol visibility) with the patched core:
 
 | | Before patch | After | Faster |
 |---|---:|---:|---:|
-| Fixed cost per frame | 954 µs | 363 µs | 2.6× |
-| `cls()` | 91 µs | 4.3 µs | 21× |
-| `rect()` full screen | 1,029 µs | 10 µs | 102× |
+| Fixed cost per frame | 954 µs | 356 µs | 2.7× |
+| `cls()` | 91 µs | 4.6 µs | 20× |
+| `rect()` full screen | 1,029 µs | 10 µs | 99× |
+| `rect()` 16×16 | 9.3 µs | 1.9 µs | 5.0× |
+| `circ()` radius 8 | 9.3 µs | 2.9 µs | 3.2× |
+| `line()` 240×136 diagonal | 12 µs | 6.4 µs | 1.9× |
+| `spr()` 8×8 | 4.2 µs | 2.5 µs | 1.7× |
 | `spr()` 32×32 | 54 µs | 26 µs | 2.0× |
-| `map()` full screen | 1,623 µs | 758 µs | 2.1× |
+| `map()` full screen | 1,623 µs | 759 µs | 2.1× |
+| `print()` 12 characters | 27 µs | 18 µs | 1.5× |
+| `tri()` ~32 px | 30 µs | 15 µs | 2.0× |
+| `ttri()` ~32 px, sprite texture | 97 µs | 56 µs | 1.7× |
 | Bunnymark per bunny (any language) | 39–55 µs | 23–33 µs | 1.6–1.7× |
-| Python logic | 5.14 µs | 3.33 µs | 1.5× |
+| Python logic (per loop iteration) | 5.14 µs | 3.38 µs | 1.5× |
+| Lua logic (per loop iteration) | 1.01 µs | 1.01 µs | unchanged |
+
+With the patch, `ttri()` from the map costs 63 µs and `textri()` 26 µs per ~32 px triangle.
+Those two tests were added after the baseline run, so there's no "before" figure on the Miyoo.
 
 [Section 6](#6-speed-budget-draw-calls-and-languages-optional) explains how to measure your own
 speed budget: the cost of each draw call and the speed of each language.
@@ -84,7 +96,7 @@ TIC-80, run `NO_PATCHES=1 ./build-core.sh`.
 | 2 | Write screen pixels directly instead of through `tic_api_poke4()`. Fill rows and spans with `memset`: `rect`, filled `circ`/`elli`, partial `cls`. | `core/draw.c` |
 | 3 | Read 4 bpp sprite and map pixels directly (no function pointer per pixel). Build one colour table per `spr`/`map` call instead of one per 8×8 tile. Read text glyphs once per character (1 bpp fast path) and write 1× scale text pixels directly. | `core/draw.c` |
 | 4 | `cls()` clears the 261 KB `ttri` depth buffer only if it was written to. The frame conversion rebuilds palettes only when they changed, and converts rows where vbank 1 is unused straight from vbank 0, two pixels per byte. Lua, MoonScript, Fennel and YueScript look up `SCN`/`BDR` once per frame instead of 432 times. | `core/draw.c`, `core/core.c`, `api/luaapi.c` |
-| 5 | Triangles: `tri`/`ttri` get a separate copy of the pixel loop per shader, so the shader is inlined instead of called through a pointer per pixel. `floor()` is replaced by an exact inline equivalent; ARMv7 has no rounding instruction, so it was a library call, twice per pixel. `ttri` and `textri` read 4 bpp sprite and map textures directly. About 2× faster on the PC. | `core/draw.c`, `core/draw_dep.c` |
+| 5 | Triangles: `tri`/`ttri` get a separate copy of the pixel loop per shader, so the shader is inlined instead of called through a pointer per pixel. `floor()` is replaced by an exact inline equivalent; ARMv7 has no rounding instruction, so it was a library call, twice per pixel. `ttri` and `textri` read 4 bpp sprite and map textures directly. On the Miyoo, `ttri` got 1.5× faster on top of items 1–4. Flat `tri` didn't change, because its remaining cost is the double-precision edge stepping. On the PC every triangle call got about 2× faster. | `core/draw.c`, `core/draw_dep.c` |
 
 **The output is unchanged.** `bench/verify-render.sh` compared every frame of 64 carts, 600 frames
 each, on PC builds of the original and patched code. The carts are the drawing and language tests,
