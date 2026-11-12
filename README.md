@@ -110,6 +110,42 @@ addresses. Over repeated runs, both cores produce exactly the same two outcomes.
 One behaviour difference: if a cart *defines* `SCN`/`BDR`/`scanline` from inside `SCN`/`BDR`
 in the middle of a frame, it takes effect from the next frame instead of the next row.
 
+### Optional: Fast Triangles
+
+Speed patch items 1–5 keep every pixel identical to TIC-80. The patch also adds an **opt-in**
+libretro core option, **Fast Triangles** (`tic80_fast_triangles`, off by default), which draws
+`tri()` and `ttri()` with an integer rasterizer, the way GPUs do:
+
+- **Exact edges:** vertices are snapped to a 1/256-pixel grid, and the edge tests are exact
+  64-bit integer arithmetic instead of double-precision values built by repeated addition.
+- **Watertight:** a pixel centre lying exactly on an edge shared by two triangles belongs to only
+  one of them (the top-left rule). Neighbouring triangles with the same vertices never leave a gap
+  or draw a pixel twice.
+- **Spans:** each row's covered span is computed exactly and then filled, so pixels outside the
+  triangle cost nothing. Flat `tri()` rows are filled with `memset`.
+- **Tiny triangles:** only zero-area triangles are skipped. The reference rasterizer also drops
+  triangles smaller than 1 pixel², which can leave holes in fine meshes.
+
+**Results** (PC builds):
+
+| | Reference rasterizer | Fast Triangles |
+|---|---:|---:|
+| Mesh test: gaps / pixels drawn twice (80 meshes, 453,569 pixels per primitive) | 0 / 15 | **0 / 0** |
+| `tri()` ~32 px | 1.40 ms per 500 | 0.70 ms per 500 (2.0×) |
+| `ttri()` ~32 px | 2.40 ms per 300 | 1.43 ms per 300 (1.7×) |
+| Pixels that differ from the reference (triangle stress cart) | – | 0.06% (edge pixels only) |
+
+The mesh test is `bench/make_watertight_cart.py`. Every frame it draws jittered grids and fans of
+triangles with shared vertices, with random winding and vertices placed exactly on pixel centres
+and integer coordinates. It counts how often each pixel inside the mesh is covered. As a negative
+control, leaving out one triangle makes it report about 200 gap pixels per mesh.
+`bench/verify-render.sh` runs it on every check.
+
+**Turning it on:**
+- On the Miyoo, during a TIC-80 game: **Menu → Quick Menu → Core Options → Fast Triangles**.
+  It takes effect immediately.
+- Or from the PC: `FAST_TRIANGLES=1 ./install-tic80.sh` (use `0` to turn it off).
+
 ### Why: benchmark on the Mini+ (Nov 2026, 1500 MHz)
 
 Frames per second with no frame limit. Games need 60; above that is spare capacity.
@@ -164,6 +200,7 @@ first boot, so step 3 has to come after it.
 ```sh
 ./install-tic80.sh                      # finds the card labelled MIYOO
 CPU_MHZ=1400 ./install-tic80.sh         # different clock for TIC-80 games
+FAST_TRIANGLES=1 ./install-tic80.sh     # also switch on the Fast Triangles core option
 ./install-tic80.sh /media/me/MIYOO some/other/tic80_libretro.so
 ```
 

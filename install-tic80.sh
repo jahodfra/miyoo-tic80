@@ -4,6 +4,7 @@
 # usage: ./install-tic80.sh [card-mountpoint] [core.so]
 #   defaults: the mounted card labelled MIYOO, dist/tic80_libretro.so
 # env:   CPU_MHZ=1500  (clock while a TIC-80 game runs; 1200 = stock, delete cpuclock.txt to disable)
+#        FAST_TRIANGLES=1|0  switch the core's "Fast Triangles" option on/off (unset: leave as is)
 #
 # What it does (each step is safe to re-run):
 #   1. core      -> RetroArch/.retroarch/cores/tic80_libretro.so  (original kept as .so.orig)
@@ -88,6 +89,15 @@ aspect_ratio_index = "21"
 video_scale_integer = "false"
 EOF
 echo "3. aspect: square pixels (TIC-80 only)"
+
+# optional: "Fast Triangles" core option (TIC-80.opt is RetroArch's core options file)
+if [ -n "${FAST_TRIANGLES:-}" ]; then
+  val=disabled; [ "$FAST_TRIANGLES" = 1 ] && val=enabled
+  OPT="$CFG/TIC-80.opt"; touch "$OPT"
+  grep -v '^tic80_fast_triangles ' "$OPT" > "$OPT.tmp" || true
+  printf 'tic80_fast_triangles = "%s"\n' "$val" >> "$OPT.tmp" && mv "$OPT.tmp" "$OPT"
+  echo "   fast triangles: $val"
+fi
 
 # 4. old save states -------------------------------------------------------------
 # (only when the TIC-80 version changed - states from the same version stay)

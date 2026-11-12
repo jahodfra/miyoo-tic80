@@ -38,6 +38,7 @@ def main():
         for line in open(gdir):
             n, _, d = line.rstrip("\n").split("\t")
             desc[n] = d
+            desc[n + "_fast"] = d + " - Fast Triangles on"
     for line in open(path, encoding="utf-8", errors="replace"):
         f = line.rstrip("\n").split("\t")
         if f[0] == "cpu_mhz":

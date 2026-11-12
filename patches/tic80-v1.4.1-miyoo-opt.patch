@@ -1,3 +1,16 @@
+diff --git a/src/api.h b/src/api.h
+index cb67d3e..268ea6d 100644
+--- a/src/api.h
++++ b/src/api.h
+@@ -1062,6 +1062,8 @@ void tic_core_tick_end(tic_mem* memory);
+ void tic_core_synth_sound(tic_mem* tic);
+ void tic_core_blit(tic_mem* tic);
+ void tic_core_blit_ex(tic_mem* tic, tic_blit_callback clb);
++// [miyoo-opt] use the fast integer triangle rasterizer for tri()/ttri() (see core/draw.c)
++void tic_core_set_fast_triangles(bool enabled);
+ #if defined(BUILD_RENDER_CACHE)
+ bool tic_core_is_dirty(tic_mem* memory);
+ void tic_core_invalidate(tic_mem* memory);
 diff --git a/src/api/luaapi.c b/src/api/luaapi.c
 index a4d0a90..d309062 100644
 --- a/src/api/luaapi.c
@@ -163,7 +176,7 @@ index fa7cbbc..eb74fca 100644
          else
          {
 diff --git a/src/core/draw.c b/src/core/draw.c
-index b9cb16e..87b2297 100644
+index b9cb16e..340cd2a 100644
 --- a/src/core/draw.c
 +++ b/src/core/draw.c
 @@ -73,25 +73,43 @@ static inline u8 mapColor(tic_mem* tic, u8 color)
@@ -472,7 +485,182 @@ index b9cb16e..87b2297 100644
              }
  
              for(s32 i = 0; i != COUNT_OF(a.w.d); ++i)
-@@ -1010,6 +1120,7 @@ typedef struct
+@@ -971,6 +1081,163 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+     }
+ }
+ 
++
++// ---------------------------------------------------------------------------------------------
++// [miyoo-opt] Optional fast triangle rasterizer, enabled by the "Fast Triangles" core option.
++//
++// The reference rasterizer above tests every pixel of the bounding box with double-precision
++// barycentric weights built by repeated addition. This one snaps vertices to a 1/256 pixel
++// grid and uses exact 64-bit integer edge functions with the top-left fill rule, like GPUs:
++//  - watertight: triangles sharing an edge (same vertices) never leave a gap or draw a pixel
++//    twice - an edge seen from the other triangle has exactly the negated edge function, and
++//    a pixel centre exactly on it belongs only to the triangle for which it is a top/left edge;
++//  - the covered span of each row is computed exactly (integer division per edge) and then
++//    filled, so pixels outside the triangle cost nothing.
++// Edges may differ from the reference rasterizer by a pixel, so it is off by default.
++// Only degenerate (zero area) triangles are skipped - the reference also drops triangles under
++// 1 pixel^2, which can leave holes in fine meshes.
++// ---------------------------------------------------------------------------------------------
++static bool FastTriangles = false;
++
++void tic_core_set_fast_triangles(bool enabled)
++{
++    FastTriangles = enabled;
++}
++
++enum
++{
++    FxBits = 8,
++    FxOne = 1 << FxBits,
++    FxHalf = FxOne / 2,
++};
++
++typedef struct
++{
++    s32 x0, x1, y0, y1; // clipped pixel bounding box, [x0, x1) x [y0, y1)
++    s64 e[3];           // edge functions at the centre of pixel (x0, y0), fill-rule bias included
++    s64 bias[3];        // 0 for top/left edges, 1 otherwise
++    s64 a[3], b[3];     // edge function step per pixel in x and in y
++    s64 area;           // edge function of the whole triangle (twice the area), > 0
++    s32 order[3];       // which input vertex ended up in each slot (winding fix swaps 1 and 2)
++} FxTri;
++
++static inline bool fxCoord(double v, s64* out)
++{
++    // NaN and coordinates beyond +-1M pixels are left to the reference rasterizer
++    if(!(v > -1048576.0 && v < 1048576.0)) return false;
++    *out = (s64)floor(v * FxOne + 0.5);
++    return true;
++}
++
++// ceil(n / 256) for any sign (>> floors for negative numbers with GCC/Clang)
++static inline s64 fxCeilDiv256(s64 n)
++{
++    return -((-n) >> FxBits);
++}
++
++// Returns false if the triangle must go to the reference rasterizer. Otherwise *t is set up and
++// the return value is true; t->x0 >= t->x1 means there is nothing to draw.
++static bool fxSetup(tic_core* core, const Vec2* p0, const Vec2* p1, const Vec2* p2, FxTri* t)
++{
++    const Vec2* p[3] = {p0, p1, p2};
++    s64 v[3][2];
++
++    for(s32 i = 0; i < 3; i++)
++        if(!fxCoord(p[i]->x, &v[i][0]) || !fxCoord(p[i]->y, &v[i][1]))
++            return false;
++
++    t->order[0] = 0, t->order[1] = 1, t->order[2] = 2;
++    t->x0 = t->x1 = 0;
++
++    s64 area = (v[1][0] - v[0][0]) * (v[2][1] - v[0][1]) - (v[1][1] - v[0][1]) * (v[2][0] - v[0][0]);
++    if(area == 0) return true;
++    if(area < 0)
++    {
++        for(s32 k = 0; k < 2; k++)
++            SWAP(v[1][k], v[2][k], s64);
++        t->order[1] = 2, t->order[2] = 1;
++        area = -area;
++    }
++    t->area = area;
++
++    // pixels whose centre (x * 256 + 128) lies within the vertices' extent
++    s64 minx = MIN(MIN(v[0][0], v[1][0]), v[2][0]), maxx = MAX(MAX(v[0][0], v[1][0]), v[2][0]);
++    s64 miny = MIN(MIN(v[0][1], v[1][1]), v[2][1]), maxy = MAX(MAX(v[0][1], v[1][1]), v[2][1]);
++    s64 x0 = fxCeilDiv256(minx - FxHalf), x1 = ((maxx - FxHalf) >> FxBits) + 1;
++    s64 y0 = fxCeilDiv256(miny - FxHalf), y1 = ((maxy - FxHalf) >> FxBits) + 1;
++    x0 = MAX(x0, core->state.clip.l), x1 = MIN(x1, core->state.clip.r);
++    y0 = MAX(y0, core->state.clip.t), y1 = MIN(y1, core->state.clip.b);
++    if(x0 >= x1 || y0 >= y1) return true;
++    t->x0 = (s32)x0, t->x1 = (s32)x1, t->y0 = (s32)y0, t->y1 = (s32)y1;
++
++    const s64 cx = x0 * FxOne + FxHalf, cy = y0 * FxOne + FxHalf;
++    for(s32 i = 0; i < 3; i++)
++    {
++        // edge i is the one opposite vertex i, oriented so it is positive inside
++        const s64* a = v[(i + 1) % 3];
++        const s64* b = v[(i + 2) % 3];
++        s64 dx = b[0] - a[0], dy = b[1] - a[1];
++        t->a[i] = -dy * FxOne;
++        t->b[i] = dx * FxOne;
++        // top-left rule: inside grows to the right (dy < 0) = left edge; horizontal edge with
++        // the inside below it (dx > 0) = top edge. Other edges don't own pixels exactly on them.
++        bool topLeft = dy < 0 || (dy == 0 && dx > 0);
++        t->bias[i] = topLeft ? 0 : 1;
++        t->e[i] = dx * (cy - a[1]) - dy * (cx - a[0]) - t->bias[i];
++    }
++    return true;
++}
++
++// Columns [*xs, *xe) of the row whose edge values are e[] (at column t->x0) that are inside.
++static inline bool fxRowSpan(const FxTri* t, const s64* e, s32* xs, s32* xe)
++{
++    s64 lo = 0, hi = t->x1 - t->x0; // offsets from x0
++    for(s32 i = 0; i < 3; i++)
++    {
++        s64 A = t->a[i], E = e[i];
++        if(A == 0)
++        {
++            if(E < 0) return false;
++        }
++        else if(A > 0)
++        {
++            // E + A*k >= 0  <=>  k >= ceil(-E / A)
++            if(E < 0)
++            {
++                s64 k = (-E + A - 1) / A;
++                if(k > lo) lo = k;
++            }
++        }
++        else
++        {
++            // E + A*k >= 0  <=>  k <= floor(E / -A)
++            if(E < 0) return false;
++            s64 k = E / -A + 1;
++            if(k < hi) hi = k;
++        }
++    }
++    if(lo >= hi) return false;
++    *xs = (s32)(t->x0 + lo), *xe = (s32)(t->x0 + hi);
++    return true;
++}
++
++static bool fxFlatTri(tic_core* core, const Vec2* p0, const Vec2* p1, const Vec2* p2, u8 color)
++{
++    FxTri t;
++    if(!fxSetup(core, p0, p1, p2, &t)) return false;
++
++    s64 e[3] = {t.e[0], t.e[1], t.e[2]};
++    for(s32 y = t.y0; y < t.y1; y++)
++    {
++        s32 xs, xe;
++        if(fxRowSpan(&t, e, &xs, &xe))
++            fillScreen(core, y * TIC80_WIDTH + xs, y * TIC80_WIDTH + xe, color);
++        for(s32 i = 0; i < 3; i++)
++            e[i] += t.b[i];
++    }
++    return true;
++}
++
+ static tic_color triColorShader(const ShaderAttr* a, s32 pixel)
+ {
+     (void)pixel;
+@@ -980,6 +1247,10 @@ static tic_color triColorShader(const ShaderAttr* a, s32 pixel)
+ void tic_api_tri(tic_mem* tic, float x1, float y1, float x2, float y2, float x3, float y3, u8 color)
+ {
+     color = mapColor(tic, color);
++
++    if(FastTriangles && fxFlatTri((tic_core*)tic, &(Vec2){{x1, y1}}, &(Vec2){{x2, y2}}, &(Vec2){{x3, y3}}, color))
++        return;
++
+     drawTri(tic,
+             &(Vec2){{x1, y1}},
+             &(Vec2){{x2, y2}},
+@@ -1010,6 +1281,7 @@ typedef struct
      const u8* map;
      const tic_vram* vram;
      bool depth;
@@ -480,7 +668,7 @@ index b9cb16e..87b2297 100644
  } TexData;
  
  static inline bool shaderStart(const ShaderAttr* a, Vec3* vars, s32 pixel)
-@@ -1050,7 +1161,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
+@@ -1050,7 +1322,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
      TexData* data = a->data;
  
      if(data->depth && color != TRANSPARENT_COLOR)
@@ -491,7 +679,7 @@ index b9cb16e..87b2297 100644
  
      return color;
  }
-@@ -1071,10 +1185,13 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
+@@ -1071,10 +1346,13 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
          HMask = TIC_SPRITESIZE - 1
      };
  
@@ -507,7 +695,7 @@ index b9cb16e..87b2297 100644
      tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
  
      return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_gettilepix(&tile, iu & WMask, iv & HMask)]);
-@@ -1093,7 +1210,9 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
+@@ -1093,7 +1371,9 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
          HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1
      };
  
@@ -518,7 +706,7 @@ index b9cb16e..87b2297 100644
  }
  
  static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
-@@ -1104,8 +1223,8 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+@@ -1104,12 +1384,115 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
      if(!shaderStart(a, &vars, pixel))
          return TRANSPARENT_COLOR;
  
@@ -529,7 +717,114 @@ index b9cb16e..87b2297 100644
  
      return shaderEnd(a, &vars, pixel, data->mapping[tic_tool_peek4(data->vram->data, iv * TIC80_WIDTH + iu)]);
  }
-@@ -1132,6 +1251,7 @@ void tic_api_ttri(tic_mem* tic,
+ 
++
++// [miyoo-opt] Fast rasterizer for ttri(): same texture lookups and depth test as the shaders
++// above, attributes interpolated across each span (u/z, v/z, 1/z when depth is on).
++static inline __attribute__((always_inline)) u8 fxTexel(const TexData* data, const u32 src, double u, double v)
++{
++    switch(src)
++    {
++        case tic_tiles_texture:
++        {
++            enum { HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1 };
++            s32 tx = floorToInt(u) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1);
++            s32 ty = floorToInt(v) & HMask;
++            return data->fast4 ? sheetPix4(&data->sheet, tx, ty) : tic_tilesheet_getpix(&data->sheet, tx, ty);
++        }
++        case tic_map_texture:
++        {
++            enum { MapWidth = TIC_MAP_WIDTH * TIC_SPRITESIZE, MapHeight = TIC_MAP_HEIGHT * TIC_SPRITESIZE };
++            s32 iu = tic_modulo(floorToInt(u), MapWidth);
++            s32 iv = tic_modulo(floorToInt(v), MapHeight);
++            u8 idx = data->map[(iv >> 3) * TIC_MAP_WIDTH + (iu >> 3)];
++            if(data->fast4) return mapTilePix4(&data->sheet, idx, iu & 7, iv & 7);
++            tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
++            return tic_tilesheet_gettilepix(&tile, iu & 7, iv & 7);
++        }
++        default: // tic_vbank_texture
++        {
++            s32 iu = tic_modulo(floorToInt(u), TIC80_WIDTH);
++            s32 iv = tic_modulo(floorToInt(v), TIC80_HEIGHT);
++            return tic_tool_peek4(data->vram->data, iv * TIC80_WIDTH + iu);
++        }
++    }
++}
++
++static inline __attribute__((always_inline)) void fxTexRows(tic_core* core, const FxTri* t, const TexData* data,
++    const u32 src, const double* q0, const double* qx, const double* qy)
++{
++    const bool depth = data->depth;
++    s64 e[3] = {t->e[0], t->e[1], t->e[2]};
++    for(s32 y = t->y0; y < t->y1; y++)
++    {
++        s32 xs, xe;
++        if(fxRowSpan(t, e, &xs, &xe))
++        {
++            double dx = xs - t->x0, dy = y - t->y0;
++            double u = q0[0] + qx[0] * dx + qy[0] * dy;
++            double v = q0[1] + qx[1] * dx + qy[1] * dy;
++            double z = q0[2] + qx[2] * dx + qy[2] * dy;
++            for(s32 x = xs, pixel = y * TIC80_WIDTH + xs; x < xe; x++, pixel++, u += qx[0], v += qx[1], z += qx[2])
++            {
++                double tu = u, tv = v;
++                if(depth)
++                {
++                    if(!(ZBuffer[pixel] < z)) continue;
++                    tu /= z, tv /= z;
++                }
++                u8 color = data->mapping[fxTexel(data, src, tu, tv)];
++                if(color != TRANSPARENT_COLOR)
++                {
++                    pokeScreen(core, pixel, color);
++                    if(depth)
++                    {
++                        ZBuffer[pixel] = z;
++                        ZBufferDirty = true;
++                    }
++                }
++            }
++        }
++        for(s32 i = 0; i < 3; i++)
++            e[i] += t->b[i];
++    }
++}
++
++// t[] are the ttri vertices (screen x,y first, then u,v,z - already divided by z for depth)
++static bool fxTexturedTri(tic_core* core, const TexVert* tv, const TexData* data, u32 src)
++{
++    FxTri t;
++    if(!fxSetup(core, (const Vec2*)&tv[0], (const Vec2*)&tv[1], (const Vec2*)&tv[2], &t)) return false;
++    if(t.x0 >= t.x1) return true;
++
++    // attribute planes: weight of slot i = (unbiased edge i) / area
++    double q0[3] = {0, 0, 0}, qx[3] = {0, 0, 0}, qy[3] = {0, 0, 0};
++    const double inv = 1.0 / (double)t.area;
++    for(s32 i = 0; i < 3; i++)
++    {
++        const Vec3* d = &tv[t.order[i]].d;
++        double w0 = (double)(t.e[i] + t.bias[i]) * inv, wx = (double)t.a[i] * inv, wy = (double)t.b[i] * inv;
++        for(s32 k = 0; k < 3; k++)
++        {
++            q0[k] += w0 * d->d[k];
++            qx[k] += wx * d->d[k];
++            qy[k] += wy * d->d[k];
++        }
++    }
++
++    switch(src)
++    {
++        case tic_tiles_texture: fxTexRows(core, &t, data, tic_tiles_texture, q0, qx, qy); break;
++        case tic_map_texture: fxTexRows(core, &t, data, tic_map_texture, q0, qx, qy); break;
++        default: fxTexRows(core, &t, data, tic_vbank_texture, q0, qx, qy); break;
++    }
++    return true;
++}
++
+ void tic_api_ttri(tic_mem* tic,
+                   float x1, float y1,
+                   float x2, float y2,
+@@ -1132,6 +1515,7 @@ void tic_api_ttri(tic_mem* tic,
              .vram = &((tic_core*)tic)->state.vbank.mem,
              .depth = depth,
          };
@@ -537,7 +832,7 @@ index b9cb16e..87b2297 100644
  
      TexVert t[] =
          {
-@@ -1146,23 +1266,25 @@ void tic_api_ttri(tic_mem* tic,
+@@ -1146,23 +1530,28 @@ void tic_api_ttri(tic_mem* tic,
                  t[i].d.y /= t[i].d.z,
                  t[i].d.z = 1.0 / t[i].d.z;
  
@@ -558,6 +853,9 @@ index b9cb16e..87b2297 100644
 -                (const Vec2*)&t[1],
 -                (const Vec2*)&t[2],
 -                Shaders[src], &texData);
++    if(FastTriangles && src <= (u32)tic_vbank_texture && fxTexturedTri((tic_core*)tic, t, &texData, src))
++        return;
++
 +    // [miyoo-opt] constant shader per call site (instead of a table) so drawTri() inlines it
 +    switch(src)
 +    {
@@ -615,3 +913,42 @@ index de14f27..dc9f9de 100644
                      if(color != TRANSPARENT_COLOR)
                          setPixel(core, x, y, color);
                      u += dudxs;
+diff --git a/src/system/libretro/libretro_core_options.h b/src/system/libretro/libretro_core_options.h
+index 94a3c90..f501355 100644
+--- a/src/system/libretro/libretro_core_options.h
++++ b/src/system/libretro/libretro_core_options.h
+@@ -63,6 +63,17 @@ struct retro_core_option_definition option_defs_us[] = {
+       },
+       "disabled"
+    },
++   {
++      "tic80_fast_triangles",
++      "Fast Triangles",
++      "Draw tri() and ttri() with a faster integer rasterizer (triangles sharing an edge never leave gaps). Triangle edges may differ by a pixel from the reference TIC-80 renderer.",
++      {
++         { "disabled", NULL },
++         { "enabled",  NULL },
++         { NULL, NULL },
++      },
++      "disabled"
++   },
+    {
+       "tic80_pointer_device",
+       "Pointer Device",
+diff --git a/src/system/libretro/tic80_libretro.c b/src/system/libretro/tic80_libretro.c
+index f03f20d..4b18f6b 100644
+--- a/src/system/libretro/tic80_libretro.c
++++ b/src/system/libretro/tic80_libretro.c
+@@ -999,6 +999,12 @@ void tic80_libretro_variables(bool startup)
+     struct retro_variable var;
+     bool lastCropBorder = state->cropBorder;
+ 
++    // [miyoo-opt] Fast Triangles
++    var.key = "tic80_fast_triangles";
++    var.value = NULL;
++    tic_core_set_fast_triangles(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value
++                                && strcmp(var.value, "enabled") == 0);
++
+     // Crop Border
+     state->cropBorder = false;
+     var.key = "tic80_crop_border";

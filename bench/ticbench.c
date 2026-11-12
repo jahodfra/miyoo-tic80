@@ -8,6 +8,9 @@
 //   ticbench <core.so> <cart.tic> hash <frames>
 //       -> prints a checksum of every frame (same scripted input) - to verify two cores render
 //          identically. Optional: <frame> <file.ppm> saves that frame as an image.
+// Environment:
+//   TICBENCH_OPTS="key=value,key=value"  core options (e.g. tic80_fast_triangles=enabled)
+//   TICBENCH_TRACE=1                     print the cart's trace() output to stderr
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdarg.h>
@@ -26,13 +29,36 @@ static int bunny_mode, hold_up;
 static retro_frame_time_callback_t frame_time_cb;
 static char sysdir[512] = "/tmp";
 
+static int show_trace;
 static void log_cb(enum retro_log_level level, const char *fmt, ...) {
-    if (level < RETRO_LOG_WARN) return;
+    if (level < RETRO_LOG_WARN && !(show_trace && level == RETRO_LOG_DEBUG)) return;
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+}
+
+// answer GET_VARIABLE from TICBENCH_OPTS="key=value,key=value"
+static bool get_option(struct retro_variable *var) {
+    static char buf[1024];
+    const char *opts = getenv("TICBENCH_OPTS");
+    if (!opts || !var->key) return false;
+    size_t klen = strlen(var->key);
+    for (const char *p = opts; *p; ) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len > klen && !strncmp(p, var->key, klen) && p[klen] == '=' && len - klen - 1 < sizeof buf) {
+            memcpy(buf, p + klen + 1, len - klen - 1);
+            buf[len - klen - 1] = 0;
+            var->value = buf;
+            return true;
+        }
+        p += len + (end ? 1 : 0);
+    }
+    return false;
 }
 
 static bool env_cb(unsigned cmd, void *data) {
     switch (cmd) {
+    case RETRO_ENVIRONMENT_GET_VARIABLE:
+        return get_option((struct retro_variable *)data);
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
         ((struct retro_log_callback *)data)->log = log_cb; return true;
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: return true;
@@ -151,6 +177,7 @@ int main(int argc, char **argv) {
     int devnull = open("/dev/null", O_WRONLY);
     if (devnull >= 0) { dup2(devnull, 1); close(devnull); }
     FILE *res = fdopen(outfd, "w");
+    show_trace = getenv("TICBENCH_TRACE") != NULL;
 
     void *h = dlopen(core, RTLD_NOW | RTLD_LOCAL);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }

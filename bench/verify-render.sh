@@ -89,4 +89,17 @@ for a in "$V"/out/*.a; do
   fi
 done
 echo "identical: $same   different: $diff   non-deterministic: $nondet"
+
+# watertightness: meshes of triangles sharing vertices must have no gaps and no overlaps
+# (checked for the patched core with "Fast Triangles" on; the reference is shown for comparison)
+python3 -I "$HERE/bench/make_watertight_cart.py" "$V/watertight.tic" >/dev/null
+docker run --rm --user "$(id -u):$(id -g)" -v "$W:/work" "$IMAGE" sh -c '
+  cd /work/verify
+  TICBENCH_TRACE=1 /work/bench/ticbench-x86 /work/x86-patched/tic80_libretro.so watertight.tic hash 40 >/dev/null 2>wt_ref.log
+  TICBENCH_TRACE=1 TICBENCH_OPTS=tic80_fast_triangles=enabled \
+    /work/bench/ticbench-x86 /work/x86-patched/tic80_libretro.so watertight.tic hash 40 >/dev/null 2>wt_fast.log'
+wt() { grep -o 'WT .*' "$V/$1" | awk '{for(i=2;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]} px+=v["pixels"]; g+=v["gaps"]; o+=v["overlaps"]}
+  END{printf "%d pixels checked, %d gaps, %d overlaps", px, g, o; exit (g+o>0)}'; }
+echo "watertightness, reference rasterizer: $(wt wt_ref.log || true)"
+if fast=$(wt wt_fast.log); then echo "watertightness, Fast Triangles:       $fast"; else echo "watertightness, Fast Triangles:       $fast  <-- FAILED"; diff=1; fi
 [ "$diff" = 0 ]
