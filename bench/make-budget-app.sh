@@ -74,7 +74,7 @@ $bin/cpuclock $mhz
     ./ticbench "$core" "gfx/$name.tic" 20 300 3 2>>errors.txt || echo "FAILED"
   done < gfx/gfx_tests.txt
   # the triangle tests again with the "Fast Triangles" core option enabled
-  for name in tri32 ttri32 ttri32map; do
+  for name in tri32 ttri32 ttri32map ttri32z; do
     n=$(grep "^$name	" gfx/gfx_tests.txt | cut -f2)
     printf 'gfx\t%s_fast\t%s\t' "$name" "$n"
     TICBENCH_OPTS=tic80_fast_triangles=enabled ./ticbench "$core" "gfx/$name.tic" 20 300 3 2>>errors.txt || echo "FAILED"

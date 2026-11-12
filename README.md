@@ -125,6 +125,12 @@ libretro core option, **Fast Triangles** (`tic80_fast_triangles`, off by default
   triangle cost nothing. Flat `tri()` rows are filled with `memset`.
 - **Tiny triangles:** only zero-area triangles are skipped. The reference rasterizer also drops
   triangles smaller than 1 pixel², which can leave holes in fine meshes.
+- **Fixed-point texturing (`ttri`):** without depth, u and v start each row span at the exact value
+  and step in 16.16 fixed point, so there's no floating point per pixel. With depth (perspective),
+  u and v are divided exactly every 8 pixels and stepped in fixed point in between: one division
+  per 8 pixels instead of two per pixel, the classic software-3D approach. The 1/z depth value
+  stays a double, because the depth buffer is shared with the reference rasterizer. Texture
+  coordinates beyond ±10⁹ fall back to double precision.
 
 **Results** (PC builds):
 
@@ -132,8 +138,16 @@ libretro core option, **Fast Triangles** (`tic80_fast_triangles`, off by default
 |---|---:|---:|
 | Mesh test: gaps / pixels drawn twice (80 meshes, 453,569 pixels per primitive) | 0 / 15 | **0 / 0** |
 | `tri()` ~32 px | 1.40 ms per 500 | 0.70 ms per 500 (2.0×) |
-| `ttri()` ~32 px | 2.40 ms per 300 | 1.43 ms per 300 (1.7×) |
-| Pixels that differ from the reference (triangle stress cart) | – | 0.06% (edge pixels only) |
+| `ttri()` ~32 px, sprite texture | 2.34 ms per 300 | 1.32 ms per 300 (1.8×) |
+| `ttri()` ~32 px, map texture | 2.67 ms per 300 | 1.54 ms per 300 (1.7×) |
+| `ttri()` ~32 px, perspective depth | 1.51 ms per 300 | 1.20 ms per 300 (1.3×) |
+| Pixels that differ from the reference (triangle stress cart) | – | 0.81% |
+
+Most of the 0.81% comes from the stress cart's small triangles whose depth changes 3× across about
+30 pixels, textured with random noise, so any texel shifted by one changes colour. Triangles
+without depth differ only along edges (0.06%). With 4-pixel perspective steps the difference drops
+to 0.30%, but perspective `ttri()` gets only 1.1× faster. The step size is `PerspSpan` in the
+patch.
 
 The mesh test is `bench/make_watertight_cart.py`. Every frame it draws jittered grids and fans of
 triangles with shared vertices, with random winding and vertices placed exactly on pixel centres

@@ -176,7 +176,7 @@ index fa7cbbc..eb74fca 100644
          else
          {
 diff --git a/src/core/draw.c b/src/core/draw.c
-index b9cb16e..340cd2a 100644
+index b9cb16e..c0b4dc7 100644
 --- a/src/core/draw.c
 +++ b/src/core/draw.c
 @@ -73,25 +73,43 @@ static inline u8 mapColor(tic_mem* tic, u8 color)
@@ -706,7 +706,7 @@ index b9cb16e..340cd2a 100644
  }
  
  static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
-@@ -1104,12 +1384,115 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+@@ -1104,12 +1384,225 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
      if(!shaderStart(a, &vars, pixel))
          return TRANSPARENT_COLOR;
  
@@ -721,22 +721,23 @@ index b9cb16e..340cd2a 100644
 +
 +// [miyoo-opt] Fast rasterizer for ttri(): same texture lookups and depth test as the shaders
 +// above, attributes interpolated across each span (u/z, v/z, 1/z when depth is on).
-+static inline __attribute__((always_inline)) u8 fxTexel(const TexData* data, const u32 src, double u, double v)
++// texel at integer texture coordinates (iu, iv) = floor(u), floor(v); same lookups as the shaders
++static inline __attribute__((always_inline)) u8 fxTexelInt(const TexData* data, const u32 src, s32 iu, s32 iv)
 +{
 +    switch(src)
 +    {
 +        case tic_tiles_texture:
 +        {
 +            enum { HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1 };
-+            s32 tx = floorToInt(u) & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1);
-+            s32 ty = floorToInt(v) & HMask;
++            s32 tx = iu & (TIC_SPRITESHEET_SIZE * data->sheet.segment->nb_pages - 1);
++            s32 ty = iv & HMask;
 +            return data->fast4 ? sheetPix4(&data->sheet, tx, ty) : tic_tilesheet_getpix(&data->sheet, tx, ty);
 +        }
 +        case tic_map_texture:
 +        {
 +            enum { MapWidth = TIC_MAP_WIDTH * TIC_SPRITESIZE, MapHeight = TIC_MAP_HEIGHT * TIC_SPRITESIZE };
-+            s32 iu = tic_modulo(floorToInt(u), MapWidth);
-+            s32 iv = tic_modulo(floorToInt(v), MapHeight);
++            iu = tic_modulo(iu, MapWidth);
++            iv = tic_modulo(iv, MapHeight);
 +            u8 idx = data->map[(iv >> 3) * TIC_MAP_WIDTH + (iu >> 3)];
 +            if(data->fast4) return mapTilePix4(&data->sheet, idx, iu & 7, iv & 7);
 +            tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
@@ -744,11 +745,16 @@ index b9cb16e..340cd2a 100644
 +        }
 +        default: // tic_vbank_texture
 +        {
-+            s32 iu = tic_modulo(floorToInt(u), TIC80_WIDTH);
-+            s32 iv = tic_modulo(floorToInt(v), TIC80_HEIGHT);
++            iu = tic_modulo(iu, TIC80_WIDTH);
++            iv = tic_modulo(iv, TIC80_HEIGHT);
 +            return tic_tool_peek4(data->vram->data, iv * TIC80_WIDTH + iu);
 +        }
 +    }
++}
++
++static inline __attribute__((always_inline)) u8 fxTexel(const TexData* data, const u32 src, double u, double v)
++{
++    return fxTexelInt(data, src, floorToInt(u), floorToInt(v));
 +}
 +
 +static inline __attribute__((always_inline)) void fxTexRows(tic_core* core, const FxTri* t, const TexData* data,
@@ -790,6 +796,94 @@ index b9cb16e..340cd2a 100644
 +    }
 +}
 +
++
++// Texture coordinates in 16.16 fixed point. floor() of the value is (value >> 16).
++enum
++{
++    TexBits = 16,
++    PerspSpan = 8, // exact perspective division every 8 pixels, linear in between
++};
++
++static inline s64 texFixed(double v)
++{
++    return (s64)floor(v * (1 << TexBits));
++}
++
++// No depth: u and v are linear across the triangle. Each span starts from the exact value and
++// steps in 16.16 fixed point - no floating point per pixel.
++static inline __attribute__((always_inline)) void fxTexRowsAffine(tic_core* core, const FxTri* t, const TexData* data,
++    const u32 src, const double* q0, const double* qx, const double* qy)
++{
++    const s64 du = texFixed(qx[0] + 0.5 / (1 << TexBits)), dv = texFixed(qx[1] + 0.5 / (1 << TexBits));
++    s64 e[3] = {t->e[0], t->e[1], t->e[2]};
++    for(s32 y = t->y0; y < t->y1; y++)
++    {
++        s32 xs, xe;
++        if(fxRowSpan(t, e, &xs, &xe))
++        {
++            double dx = xs - t->x0, dy = y - t->y0;
++            s64 u = texFixed(q0[0] + qx[0] * dx + qy[0] * dy);
++            s64 v = texFixed(q0[1] + qx[1] * dx + qy[1] * dy);
++            for(s32 pixel = y * TIC80_WIDTH + xs, end = y * TIC80_WIDTH + xe; pixel < end; pixel++, u += du, v += dv)
++            {
++                u8 color = data->mapping[fxTexelInt(data, src, (s32)(u >> TexBits), (s32)(v >> TexBits))];
++                if(color != TRANSPARENT_COLOR)
++                    pokeScreen(core, pixel, color);
++            }
++        }
++        for(s32 i = 0; i < 3; i++)
++            e[i] += t->b[i];
++    }
++}
++
++// Depth: u/z, v/z and 1/z are linear; u and v are divided exactly every PerspSpan pixels and
++// stepped in 16.16 fixed point in between. 1/z itself stays a double: it is compared with and
++// stored in the depth buffer, which the reference rasterizer shares.
++static inline __attribute__((always_inline)) void fxTexRowsPersp(tic_core* core, const FxTri* t, const TexData* data,
++    const u32 src, const double* q0, const double* qx, const double* qy)
++{
++    s64 e[3] = {t->e[0], t->e[1], t->e[2]};
++    for(s32 y = t->y0; y < t->y1; y++)
++    {
++        s32 xs, xe;
++        if(fxRowSpan(t, e, &xs, &xe))
++        {
++            double dx = xs - t->x0, dy = y - t->y0;
++            double uz = q0[0] + qx[0] * dx + qy[0] * dy;
++            double vz = q0[1] + qx[1] * dx + qy[1] * dy;
++            double z = q0[2] + qx[2] * dx + qy[2] * dy;
++            s64 u = z > 0 ? texFixed(uz / z) : 0, v = z > 0 ? texFixed(vz / z) : 0;
++
++            for(s32 x = xs, pixel = y * TIC80_WIDTH + xs; x < xe;)
++            {
++                s32 n = MIN(PerspSpan, xe - x);
++                double uz2 = uz + qx[0] * n, vz2 = vz + qx[1] * n, z2 = z + qx[2] * n;
++                s64 u2 = u, v2 = v;
++                if(z2 > 0) u2 = texFixed(uz2 / z2), v2 = texFixed(vz2 / z2);
++                s64 du = n == PerspSpan ? (u2 - u) / PerspSpan : (u2 - u) / n;
++                s64 dv = n == PerspSpan ? (v2 - v) / PerspSpan : (v2 - v) / n;
++
++                double zz = z;
++                for(s32 k = 0; k < n; k++, pixel++, zz += qx[2], u += du, v += dv)
++                {
++                    if(!(ZBuffer[pixel] < zz)) continue;
++                    u8 color = data->mapping[fxTexelInt(data, src, (s32)(u >> TexBits), (s32)(v >> TexBits))];
++                    if(color != TRANSPARENT_COLOR)
++                    {
++                        pokeScreen(core, pixel, color);
++                        ZBuffer[pixel] = zz;
++                        ZBufferDirty = true;
++                    }
++                }
++
++                x += n, uz = uz2, vz = vz2, z = z2, u = u2, v = v2;
++            }
++        }
++        for(s32 i = 0; i < 3; i++)
++            e[i] += t->b[i];
++    }
++}
++
 +// t[] are the ttri vertices (screen x,y first, then u,v,z - already divided by z for depth)
 +static bool fxTexturedTri(tic_core* core, const TexVert* tv, const TexData* data, u32 src)
 +{
@@ -812,19 +906,35 @@ index b9cb16e..340cd2a 100644
 +        }
 +    }
 +
++    // Fixed point needs texture coordinates that fit 16.16 in 64 bits; inside the triangle they
++    // stay within the vertices' range. Huge or NaN coordinates use the double-precision loop.
++    bool fixedOk = true;
++    for(s32 i = 0; i < 3; i++)
++    {
++        const Vec3* d = &tv[i].d;
++        double u = data->depth ? d->x / d->z : d->x, v = data->depth ? d->y / d->z : d->y;
++        if(!(fabs(u) < 1e9 && fabs(v) < 1e9)) fixedOk = false;
++    }
++
++#define FX_TEX_ROWS(SRC)                                                        \
++    if(!fixedOk) fxTexRows(core, &t, data, SRC, q0, qx, qy);                    \
++    else if(data->depth) fxTexRowsPersp(core, &t, data, SRC, q0, qx, qy);       \
++    else fxTexRowsAffine(core, &t, data, SRC, q0, qx, qy)
++
 +    switch(src)
 +    {
-+        case tic_tiles_texture: fxTexRows(core, &t, data, tic_tiles_texture, q0, qx, qy); break;
-+        case tic_map_texture: fxTexRows(core, &t, data, tic_map_texture, q0, qx, qy); break;
-+        default: fxTexRows(core, &t, data, tic_vbank_texture, q0, qx, qy); break;
++        case tic_tiles_texture: FX_TEX_ROWS(tic_tiles_texture); break;
++        case tic_map_texture: FX_TEX_ROWS(tic_map_texture); break;
++        default: FX_TEX_ROWS(tic_vbank_texture); break;
 +    }
++#undef FX_TEX_ROWS
 +    return true;
 +}
 +
  void tic_api_ttri(tic_mem* tic,
                    float x1, float y1,
                    float x2, float y2,
-@@ -1132,6 +1515,7 @@ void tic_api_ttri(tic_mem* tic,
+@@ -1132,6 +1625,7 @@ void tic_api_ttri(tic_mem* tic,
              .vram = &((tic_core*)tic)->state.vbank.mem,
              .depth = depth,
          };
@@ -832,7 +942,7 @@ index b9cb16e..340cd2a 100644
  
      TexVert t[] =
          {
-@@ -1146,23 +1530,28 @@ void tic_api_ttri(tic_mem* tic,
+@@ -1146,23 +1640,28 @@ void tic_api_ttri(tic_mem* tic,
                  t[i].d.y /= t[i].d.z,
                  t[i].d.z = 1.0 / t[i].d.z;
  

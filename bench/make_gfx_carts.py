@@ -24,6 +24,7 @@ TESTS = [
     ("tri32",     500,   "tri() ~32px filled triangle",              "local x,y=i%208,i%104 tri(x,y,x+32,y+8,x+8,y+32,i%16)"),
     ("ttri32",    300,   "ttri() ~32px textured triangle",           "local x,y=i%208,i%104 ttri(x,y,x+32,y+8,x+8,y+32,0,0,32,0,0,32)"),
     ("ttri32map", 300,   "ttri() ~32px textured from the map",       "local x,y=i%208,i%104 ttri(x,y,x+32,y+8,x+8,y+32,0,0,32,0,0,32,1)"),
+    ("ttri32z",   300,   "ttri() ~32px with perspective depth",      "if i==1 then cls(0) end local x,y=i%208,i%104 ttri(x,y,x+32,y+8,x+8,y+32,0,0,32,0,0,32,0,-1,1+i%3,2,1.5)"),
     ("textri32",  300,   "textri() ~32px (deprecated API)",          "local x,y=i%208,i%104 textri(x,y,x+32,y+8,x+8,y+32,0,0,32,0,0,32)"),
     ("spr8",      2000,  "spr() 8x8 with transparent color",         "spr(1,i%232,i%128,0)"),
     ("spr32",     500,   "spr() 32x32 (4x4 tiles) transparent",      "spr(1,i%208,i%104,0,1,0,0,4,4)"),
