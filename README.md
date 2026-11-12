@@ -22,7 +22,8 @@ for TIC-80 1.x.
 | `rect()` full screen | 1,029 µs | 10 µs | 99× |
 | `rect()` 16×16 | 9.3 µs | 1.9 µs | 5.0× |
 | `circ()` radius 8 | 9.3 µs | 2.9 µs | 3.2× |
-| `line()` 240×136 diagonal | 12 µs | 6.4 µs | 1.9× |
+| `line()` 240×136 diagonal | 12 µs | 4.8 µs | 2.5× |
+| `rrect()` / `rrectb()` 24×24, radius 6 | – | 4.0 / 4.3 µs | (new test) |
 | `spr()` 8×8 | 4.2 µs | 2.5 µs | 1.7× |
 | `spr()` 32×32 | 54 µs | 26 µs | 2.0× |
 | `map()` full screen | 1,623 µs | 759 µs | 2.1× |
@@ -97,7 +98,7 @@ TIC-80, run `NO_PATCHES=1 ./build-core.sh`.
 | 3 | Read 4 bpp sprite and map pixels directly (no function pointer per pixel). Build one colour table per `spr`/`map` call instead of one per 8×8 tile. Read text glyphs once per character (1 bpp fast path) and write 1× scale text pixels directly. | `core/draw.c` |
 | 4 | `cls()` clears the 261 KB `ttri` depth buffer only if it was written to. The frame conversion rebuilds palettes only when they changed, and converts rows where vbank 1 is unused straight from vbank 0, two pixels per byte. Lua, MoonScript, Fennel and YueScript look up `SCN`/`BDR` once per frame instead of 432 times. | `core/draw.c`, `core/core.c`, `api/luaapi.c` |
 | 5 | Triangles: `tri`/`ttri` get a separate copy of the pixel loop per shader, so the shader is inlined instead of called through a pointer per pixel. `floor()` is replaced by an exact inline equivalent; ARMv7 has no rounding instruction, so it was a library call, twice per pixel. `ttri` and `textri` read 4 bpp sprite and map textures directly. On the Miyoo, `ttri` got 1.5× faster on top of items 1–4. Flat `tri` didn't change, because its remaining cost is the double-precision edge stepping. On the PC every triangle call got about 2× faster. | `core/draw.c`, `core/draw_dep.c` |
-| 6 | `rrect`/`rrectb` with round corners (exponent 2, radius ≤ 2895) use exact integer maths instead of 4 `powf()` calls per corner step. `powf(n, 2)` was checked to be exact for these values on PC and Miyoo glibc, so the decisions are identical (PC: `rrect` 1.4×, `rrectb` 1.2×). `line`/`trib` keep the clip rectangle and screen pointer in local variables instead of reloading them for every pixel. | `core/draw.c` |
+| 6 | `rrect`/`rrectb` with round corners (exponent 2, radius ≤ 2895) use exact integer maths instead of 4 `powf()` calls per corner step. `powf(n, 2)` was checked to be exact for these values on PC and Miyoo glibc, so the decisions are identical (PC: `rrect` 1.4×, `rrectb` 1.2×). `line`/`trib` keep the clip rectangle and screen pointer in local variables instead of reloading them for every pixel. That made no difference on the PC, but `line()` is 1.3× faster on the Miyoo. | `core/draw.c` |
 
 **The output is unchanged.** `bench/verify-render.sh` compared every frame of 67 carts on PC
 builds of the original and patched code. The carts are:
@@ -139,6 +140,22 @@ libretro core option, **Fast Triangles** (`tic80_fast_triangles`, off by default
   per 8 pixels instead of two per pixel, the classic software-3D approach. The 1/z depth value
   stays a double, because the depth buffer is shared with the reference rasterizer. Texture
   coordinates beyond ±10⁹ fall back to double precision.
+
+**Results on the Miyoo** (1500 MHz, ~32 px triangles):
+
+| | Reference rasterizer | Fast Triangles | Faster |
+|---|---:|---:|---:|
+| `tri()` | 14.9 µs | 7.0 µs | 2.1× |
+| `ttri()`, sprite texture | 51.5 µs | 27.2 µs | 1.9× |
+| `ttri()`, map texture | 57.7 µs | 35.2 µs | 1.6× |
+| `ttri()`, perspective depth | 43.4 µs | 42.9 µs | 1.0× |
+| Mesh test on the device: gaps / pixels drawn twice (40 checks, 451,528 pixels) | – | **0 / 0** | |
+| 600 random triangles × 30 frames: checksums vs the PC build | – | identical | |
+
+On the ARMv7 CPU, 64-bit division and `floor()` are slow library calls. The row spans are
+therefore stepped with exact integer remainders: 2 divisions per edge per triangle instead of
+3 per row. Perspective `ttri()` only breaks even, because its per-pixel depth test stays in double
+precision.
 
 **Results** (PC builds):
 
