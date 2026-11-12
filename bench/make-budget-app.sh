@@ -34,6 +34,11 @@ A="$M/App/TICBudget"; rm -rf "$A"; mkdir -p "$A/gfx" "$A/lang" "$A/calc"
 cp "$B/ticbench" "$A/"
 python3 -I "$HERE/bench/make_gfx_carts.py" "$A/gfx"
 python3 -I "$HERE/bench/make_lang_carts.py" "$A/calc"
+# correctness checks run on the device before the timings (compared with the PC by
+# bench/budget-report.py / by hand): watertight meshes, and random triangles incl. degenerate ones
+mkdir -p "$A/check"
+python3 -I "$HERE/bench/make_watertight_cart.py" "$A/check/watertight.tic" >/dev/null
+python3 -I "$HERE/bench/make_random_tri_cart.py" "$A/check/randomtri.tic" >/dev/null
 D="$SRC/demos/bunny"
 # name | project file | bunnies added per frame while UP is held (wren's 1...5 loop adds 4)
 LANGS="lua|luamark.lua|5 moon|moonmark.moon|5 yue|yuemark.yue|5 js|jsmark.js|5 wren|wrenmark.wren|4 squirrel|squirrelmark.nut|5 python|pythonmark.py|5 scheme|schememark.scm|5"
@@ -67,6 +72,11 @@ panel=$!
 echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 mhz=$(cat /mnt/SDCARD/Saves/CurrentProfile/config/TIC-80/cpuclock.txt 2>/dev/null || echo 1200)
 $bin/cpuclock $mhz
+# busybox timeout uses "-t SECONDS" on the Miyoo; a hang must not freeze the benchmark
+TO=""; timeout -t 1 true 2>/dev/null && TO="timeout -t 120"
+FT=tic80_fast_triangles=enabled
+TICBENCH_TRACE=1 TICBENCH_OPTS=$FT $TO ./ticbench "$core" check/watertight.tic hash 20 >/dev/null 2>check_watertight.txt || echo "FAILED/TIMEOUT exit $?" >> check_watertight.txt
+TICBENCH_OPTS=$FT $TO ./ticbench "$core" check/randomtri.tic hash 30 >check_randomtri.txt 2>>errors.txt || echo "FAILED/TIMEOUT exit $?" >> check_randomtri.txt
 {
   echo "cpu_mhz	$mhz"
   while IFS='	' read -r name n desc; do
