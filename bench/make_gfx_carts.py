@@ -19,6 +19,8 @@ TESTS = [
     ("rect16",    2000,  "rect() 16x16 filled",                      "rect(i%224,i%120,16,16,i%16)"),
     ("rectfull",  50,    "rect() 240x136 full screen",               "rect(0,0,240,136,i%16)"),
     ("rectb16",   2000,  "rectb() 16x16 outline",                    "rectb(i%224,i%120,16,16,i%16)"),
+    ("rrect24",   1000,  "rrect() 24x24 radius 6",                   "rrect(i%216,i%112,24,24,i%16,6)"),
+    ("rrectb24",  1000,  "rrectb() 24x24 radius 6",                  "rrectb(i%216,i%112,24,24,i%16,6)"),
     ("circ8",     1000,  "circ() radius 8 filled",                   "circ(8+i%224,8+i%120,8,i%16)"),
     ("circb8",    1000,  "circb() radius 8 outline",                 "circb(8+i%224,8+i%120,8,i%16)"),
     ("tri32",     500,   "tri() ~32px filled triangle",              "local x,y=i%208,i%104 tri(x,y,x+32,y+8,x+8,y+32,i%16)"),

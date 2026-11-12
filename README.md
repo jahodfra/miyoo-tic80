@@ -97,12 +97,20 @@ TIC-80, run `NO_PATCHES=1 ./build-core.sh`.
 | 3 | Read 4 bpp sprite and map pixels directly (no function pointer per pixel). Build one colour table per `spr`/`map` call instead of one per 8×8 tile. Read text glyphs once per character (1 bpp fast path) and write 1× scale text pixels directly. | `core/draw.c` |
 | 4 | `cls()` clears the 261 KB `ttri` depth buffer only if it was written to. The frame conversion rebuilds palettes only when they changed, and converts rows where vbank 1 is unused straight from vbank 0, two pixels per byte. Lua, MoonScript, Fennel and YueScript look up `SCN`/`BDR` once per frame instead of 432 times. | `core/draw.c`, `core/core.c`, `api/luaapi.c` |
 | 5 | Triangles: `tri`/`ttri` get a separate copy of the pixel loop per shader, so the shader is inlined instead of called through a pointer per pixel. `floor()` is replaced by an exact inline equivalent; ARMv7 has no rounding instruction, so it was a library call, twice per pixel. `ttri` and `textri` read 4 bpp sprite and map textures directly. On the Miyoo, `ttri` got 1.5× faster on top of items 1–4. Flat `tri` didn't change, because its remaining cost is the double-precision edge stepping. On the PC every triangle call got about 2× faster. | `core/draw.c`, `core/draw_dep.c` |
+| 6 | `rrect`/`rrectb` with round corners (exponent 2, radius ≤ 2895) use exact integer maths instead of 4 `powf()` calls per corner step. `powf(n, 2)` was checked to be exact for these values on PC and Miyoo glibc, so the decisions are identical (PC: `rrect` 1.4×, `rrectb` 1.2×). `line`/`trib` keep the clip rectangle and screen pointer in local variables instead of reloading them for every pixel. | `core/draw.c` |
 
-**The output is unchanged.** `bench/verify-render.sh` compared every frame of 64 carts, 600 frames
-each, on PC builds of the original and patched code. The carts are the drawing and language tests,
-the bunnymarks, a triangle stress cart (`bench/make_tri_test_cart.py`: every `tri`/`ttri`/`textri`
-mode, depth, clipping, off-screen and odd texture coordinates) and 24 games, including FPS80 and
-Portal TIC-80. All matched. Carts that seed randomness from the clock were run with a fixed clock.
+**The output is unchanged.** `bench/verify-render.sh` compared every frame of 67 carts on PC
+builds of the original and patched code. The carts are:
+- the drawing and language tests and the bunnymarks;
+- a triangle stress cart (`bench/make_tri_test_cart.py`): every `tri`/`ttri`/`textri` mode, depth,
+  clipping, off-screen and odd texture coordinates;
+- a shapes stress cart (`bench/make_shapes_test_cart.py`): `line`/`trib` with fractional and
+  off-screen ends, `rrect`/`rrectb` with radii from 0 to oversized and many corner exponents;
+- 24 games, including FPS80 and Portal TIC-80.
+
+All matched. Carts that seed randomness from the clock were run with a fixed clock. The shapes
+cart was also checked on the ARM build under emulation, where the patched and unpatched cores
+are identical.
 
 One game, Dragon Fury, is non-deterministic even on plain TIC-80 because it depends on memory
 addresses. Over repeated runs, both cores produce exactly the same two outcomes.

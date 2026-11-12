@@ -176,7 +176,7 @@ index fa7cbbc..eb74fca 100644
          else
          {
 diff --git a/src/core/draw.c b/src/core/draw.c
-index b9cb16e..c0b4dc7 100644
+index b9cb16e..3380190 100644
 --- a/src/core/draw.c
 +++ b/src/core/draw.c
 @@ -73,25 +73,43 @@ static inline u8 mapColor(tic_mem* tic, u8 color)
@@ -455,7 +455,54 @@ index b9cb16e..c0b4dc7 100644
      }
  }
  
-@@ -690,8 +799,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
+@@ -621,6 +730,46 @@ static void drawSuperEllipseCapsule(tic_mem* memory, s32 x0, s32 y0, s32 x1, s32
+     y0 += radius;
+     y1 -= radius;
+ 
++    // [miyoo-opt] Round corners (exponent 2): powf(n, 2) is exact for |n| <= 4096 (checked for
++    // glibc on x86 and on the Miyoo), and for radius <= 2895 every sum below stays under 2^24,
++    // so the float code is exact integer arithmetic - do the same with integers, no powf().
++    if(exponent == 2.0f && radius <= 2895)
++    {
++        const s64 irn = (s64)radius * radius;
++        while(x <= y)
++        {
++            pix(memory, x0 - x, y0 - y, color);
++            pix(memory, x0 - x, y1 + y, color);
++            pix(memory, x1 + x, y0 - y, color);
++            pix(memory, x1 + x, y1 + y, color);
++
++            if(x != y)
++            {
++                pix(memory, x0 - y, y0 - x, color);
++                pix(memory, x0 - y, y1 + x, color);
++                pix(memory, x1 + y, y0 - x, color);
++                pix(memory, x1 + y, y1 + x, color);
++            }
++
++            s64 xp0 = (s64)x * x, xp1 = (s64)(x + 1) * (x + 1);
++            s64 yp0 = (s64)y * y, yp1 = (s64)(y - 1) * (y - 1);
++            s64 eh = llabs(xp1 + yp0 - irn);
++            s64 ed = llabs(xp1 + yp1 - irn);
++            s64 ev = llabs(xp0 + yp1 - irn);
++
++            if(eh <= ed && eh <= ev && x < y - 1)
++                x++;
++            else if(ev <= ed && x < y - 1)
++                y--;
++            else
++            {
++                x++;
++                y--;
++            }
++        }
++        return;
++    }
++
+     while(x <= y)
+     {
+         pix(memory, x0 - x, y0 - y, color);
+@@ -690,8 +839,7 @@ static void drawSidesBuffer(tic_mem* memory, s32 y0, s32 y1, u8 color)
          s32 xr = MIN(SidesBuffer.Right[y] + 1, core->state.clip.r);
          s32 start = y * TIC80_WIDTH;
  
@@ -465,7 +512,45 @@ index b9cb16e..c0b4dc7 100644
      }
  }
  
-@@ -907,7 +1015,9 @@ static inline double edgeFn(const Vec2* a, const Vec2* b, const Vec2* c)
+@@ -767,18 +915,34 @@ static inline float initLine(float* x0, float* x1, float* y0, float* y1)
+ 
+ static void drawLine(tic_mem* tic, float x0, float y0, float x1, float y1, u8 color)
+ {
++    // [miyoo-opt] Same float stepping and the same clip test as setPixel(), but with the clip
++    // rectangle and the screen pointer in locals: writing a pixel through a u8* may alias
++    // anything, so setPixel() had to reload them from memory for every pixel.
++    const tic_core* core = (tic_core*)tic;
++    const s32 cl = core->state.clip.l, ct = core->state.clip.t, cr = core->state.clip.r, cb = core->state.clip.b;
++    u8* const ram = (u8*)core->memory.ram;
++
++#define LINE_PIXEL(X, Y)                                                    \
++    do                                                                      \
++    {                                                                       \
++        s32 px_ = (X), py_ = (Y);                                           \
++        if(px_ >= cl && py_ >= ct && px_ < cr && py_ < cb)                  \
++            tic_tool_poke4(ram, py_ * TIC80_WIDTH + px_, color);            \
++    } while(0)
++
+     // the counter steps by one and the fraction it starts at is the line's own:
+     // an integer counter would draw a different last pixel
+     if(fabs(x0 - x1) < fabs(y0 - y1))
+         // NOLINTNEXTLINE(clang-analyzer-security.FloatLoopCounter): a raster counter, exact at one a step
+         for(float t = initLine(&x0, &x1, &y0, &y1); y0 < y1; y0++, x0 += t)
+-            setPixel((tic_core*)tic, (s32)(x0), (s32)y0, color);
++            LINE_PIXEL((s32)(x0), (s32)y0);
+     else
+         // NOLINTNEXTLINE(clang-analyzer-security.FloatLoopCounter): a raster counter, exact at one a step
+         for(float t = initLine(&y0, &y1, &x0, &x1); x0 < x1; x0++, y0 += t)
+-            setPixel((tic_core*)tic, (s32)(x0), (s32)y0, color);
++            LINE_PIXEL((s32)(x0), (s32)y0);
+ 
+-    setPixel((tic_core*)tic, (s32)(x1), (s32)y1, color);
++    LINE_PIXEL((s32)(x1), (s32)y1);
++#undef LINE_PIXEL
+ }
+ 
+ // Queue frame for floodFill.
+@@ -907,7 +1071,9 @@ static inline double edgeFn(const Vec2* a, const Vec2* b, const Vec2* c)
      return (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
  }
  
@@ -476,7 +561,7 @@ index b9cb16e..c0b4dc7 100644
  {
      ShaderAttr a = {.data = data, .v = {v0, v1, v2}};
  
-@@ -959,7 +1069,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+@@ -959,7 +1125,7 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
              {
                  u8 color = shader(&a, pixel);
                  if(color != TRANSPARENT_COLOR)
@@ -485,7 +570,7 @@ index b9cb16e..c0b4dc7 100644
              }
  
              for(s32 i = 0; i != COUNT_OF(a.w.d); ++i)
-@@ -971,6 +1081,163 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
+@@ -971,6 +1137,163 @@ static void drawTri(tic_mem* tic, const Vec2* v0, const Vec2* v1, const Vec2* v2
      }
  }
  
@@ -649,7 +734,7 @@ index b9cb16e..c0b4dc7 100644
  static tic_color triColorShader(const ShaderAttr* a, s32 pixel)
  {
      (void)pixel;
-@@ -980,6 +1247,10 @@ static tic_color triColorShader(const ShaderAttr* a, s32 pixel)
+@@ -980,6 +1303,10 @@ static tic_color triColorShader(const ShaderAttr* a, s32 pixel)
  void tic_api_tri(tic_mem* tic, float x1, float y1, float x2, float y2, float x3, float y3, u8 color)
  {
      color = mapColor(tic, color);
@@ -660,7 +745,7 @@ index b9cb16e..c0b4dc7 100644
      drawTri(tic,
              &(Vec2){{x1, y1}},
              &(Vec2){{x2, y2}},
-@@ -1010,6 +1281,7 @@ typedef struct
+@@ -1010,6 +1337,7 @@ typedef struct
      const u8* map;
      const tic_vram* vram;
      bool depth;
@@ -668,7 +753,7 @@ index b9cb16e..c0b4dc7 100644
  } TexData;
  
  static inline bool shaderStart(const ShaderAttr* a, Vec3* vars, s32 pixel)
-@@ -1050,7 +1322,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
+@@ -1050,7 +1378,10 @@ static inline tic_color shaderEnd(const ShaderAttr* a, const Vec3* vars, s32 pix
      TexData* data = a->data;
  
      if(data->depth && color != TRANSPARENT_COLOR)
@@ -679,7 +764,7 @@ index b9cb16e..c0b4dc7 100644
  
      return color;
  }
-@@ -1071,10 +1346,13 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
+@@ -1071,10 +1402,13 @@ static tic_color triTexMapShader(const ShaderAttr* a, s32 pixel)
          HMask = TIC_SPRITESIZE - 1
      };
  
@@ -695,7 +780,7 @@ index b9cb16e..c0b4dc7 100644
      tic_tileptr tile = tic_tilesheet_gettile(&data->sheet, idx, true);
  
      return shaderEnd(a, &vars, pixel, data->mapping[tic_tilesheet_gettilepix(&tile, iu & WMask, iv & HMask)]);
-@@ -1093,7 +1371,9 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
+@@ -1093,7 +1427,9 @@ static tic_color triTexTileShader(const ShaderAttr* a, s32 pixel)
          HMask = TIC_SPRITESHEET_SIZE * TIC_SPRITE_BANKS - 1
      };
  
@@ -706,7 +791,7 @@ index b9cb16e..c0b4dc7 100644
  }
  
  static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
-@@ -1104,12 +1384,225 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
+@@ -1104,12 +1440,225 @@ static tic_color triTexVbankShader(const ShaderAttr* a, s32 pixel)
      if(!shaderStart(a, &vars, pixel))
          return TRANSPARENT_COLOR;
  
@@ -934,7 +1019,7 @@ index b9cb16e..c0b4dc7 100644
  void tic_api_ttri(tic_mem* tic,
                    float x1, float y1,
                    float x2, float y2,
-@@ -1132,6 +1625,7 @@ void tic_api_ttri(tic_mem* tic,
+@@ -1132,6 +1681,7 @@ void tic_api_ttri(tic_mem* tic,
              .vram = &((tic_core*)tic)->state.vbank.mem,
              .depth = depth,
          };
@@ -942,7 +1027,7 @@ index b9cb16e..c0b4dc7 100644
  
      TexVert t[] =
          {
-@@ -1146,23 +1640,28 @@ void tic_api_ttri(tic_mem* tic,
+@@ -1146,23 +1696,28 @@ void tic_api_ttri(tic_mem* tic,
                  t[i].d.y /= t[i].d.z,
                  t[i].d.z = 1.0 / t[i].d.z;
  

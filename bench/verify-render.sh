@@ -61,13 +61,14 @@ else
 fi
 # always include the triangle stress test (tri/trib/ttri/textri, clipping, depth, odd UVs)
 python3 -I "$HERE/bench/make_tri_test_cart.py" "$V/tritest.tic" >/dev/null
-TRI="$V/tritest.tic"
+# ...and the shapes stress test (line/trib/rrect/rrectb, clipping, odd radii and exponents)
+python3 -I "$HERE/bench/make_shapes_test_cart.py" "$V/shapes.tic" >/dev/null
 rm -rf "$V/out"; mkdir -p "$V/out"
 
-echo ">> running $(( $(ls "$C"/*.tic | wc -l) + 1 )) carts x $FRAMES frames (plain twice, patched once)"
+echo ">> running $(( $(ls "$C"/*.tic | wc -l) + 2 )) carts x $FRAMES frames (plain twice, patched once)"
 docker run --rm --user "$(id -u):$(id -g)" -v "$W:/work" -v "$C:/carts:ro" "$IMAGE" sh -c '
   cd /work/verify/out
-  for c in /carts/*.tic /work/verify/tritest.tic; do
+  for c in /carts/*.tic /work/verify/tritest.tic /work/verify/shapes.tic; do
     n=$(basename "$c" .tic)
     for r in plain:a plain:b patched:p; do
       core=${r%%:*}; tag=${r#*:}
@@ -84,7 +85,7 @@ for a in "$V"/out/*.a; do
   elif cmp -s "$a" "$V/out/$n.p"; then
     same=$((same + 1))
   else
-    first=$(diff "$a" "$V/out/$n.p" | sed -n 2p | cut -d' ' -f2)
+    first=$(diff "$a" "$V/out/$n.p" | sed -n 2p | cut -d' ' -f2 || true)
     echo "  DIFFERENT: $n (first differing frame: $first)"; diff=$((diff + 1))
   fi
 done
